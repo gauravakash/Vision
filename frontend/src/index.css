@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: 'Satoshi', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #FDFAF6;
+    color: #1A1208;
+    margin: 0;
+    padding: 0;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Clash Display', sans-serif;
+  }
+}
+
+@layer components {
+  /* Skeleton shimmer */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      #F2EDE4 25%,
+      #E8E0D4 50%,
+      #F2EDE4 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 6px;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 99px;
+  }
+
+  /* Textarea */
+  .draft-textarea {
+    font-family: 'Satoshi', sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    resize: vertical;
+    min-height: 100px;
+    width: 100%;
+    padding: 12px;
+    border: 1.5px solid rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    background: #FDFAF6;
+    color: #1A1208;
+    transition: border-color 0.15s;
+    outline: none;
+  }
+  .draft-textarea:focus {
+    border-color: #FF5C1A;
+    box-shadow: 0 0 0 3px rgba(255, 92, 26, 0.08);
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes spike-pulse {
+  0%, 100% { border-color: rgba(192, 57, 43, 0.3); }
+  50% { border-color: rgba(192, 57, 43, 0.9); box-shadow: 0 0 12px rgba(192, 57, 43, 0.2); }
+}
+
+.spike-card {
+  animation: spike-pulse 2s ease-in-out infinite;
+}
+
+/* Nav active state */
+.nav-active {
+  background: #FFFFFF;
+  color: #FF5C1A;
+  border: 1px solid rgba(255, 92, 26, 0.25);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
