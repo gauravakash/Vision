@@ -17,6 +17,7 @@ Module-level singleton: tweet_poster = TweetPoster()
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import time
 from datetime import datetime, timedelta, timezone
@@ -59,7 +60,7 @@ HUMAN_BEHAVIOR = {
     "mid_type_pause_duration": (0.5, 2.0),
 }
 
-_CHROME_PATH = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+_CHROME_PATH = os.environ.get("CHROME_EXECUTABLE_PATH", "")
 _CHROME_ARGS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -267,11 +268,13 @@ class TweetPoster:
 
         try:
             async with async_playwright() as pw:
-                browser = await pw.chromium.launch(
-                    headless=True,
-                    executable_path=_CHROME_PATH,
-                    args=_CHROME_ARGS,
-                )
+                launch_kwargs: dict[str, Any] = {
+                    "headless": True,
+                    "args": _CHROME_ARGS,
+                }
+                if _CHROME_PATH:
+                    launch_kwargs["executable_path"] = _CHROME_PATH
+                browser = await pw.chromium.launch(**launch_kwargs)
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent=_REALISTIC_UA,

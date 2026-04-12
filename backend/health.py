@@ -21,7 +21,16 @@ from backend.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_DB_PATH = Path("xagent.db")
+
+def _resolve_db_path() -> Path:
+    """Extract the SQLite file path from DATABASE_URL."""
+    url = settings.DATABASE_URL
+    if ":///" in url:
+        return Path(url.split(":///", 1)[1])
+    return Path("xagent.db")
+
+
+_DB_PATH = _resolve_db_path()
 _LOG_DIR = Path("logs")
 
 

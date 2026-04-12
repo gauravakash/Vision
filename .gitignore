@@ -34,3 +34,21 @@ Thumbs.db
 # IDE
 .vscode/settings.json
 .idea/
+*.swp
+
+# Node
+node_modules/
+
+# Docker
+certbot/
+
+# Backups
+*-backups/
+*.backup
+
+# Data
+data/
+
+# Playwright
+/playwright-report/
+/test-results/

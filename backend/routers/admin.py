@@ -265,7 +265,9 @@ async def database_stats(db: AsyncSession = Depends(get_db)) -> dict:
     oldest = oldest_r.scalar_one()
     newest = newest_r.scalar_one()
 
-    db_path = Path("xagent.db")
+    # Derive DB file path from DATABASE_URL
+    _url = settings.DATABASE_URL
+    db_path = Path(_url.split(":///", 1)[1]) if ":///" in _url else Path("xagent.db")
     file_size_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0.0
 
     return {

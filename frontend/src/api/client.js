@@ -1,8 +1,15 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: '',          // Vite proxy forwards /api → localhost:8000
+  baseURL: '',          // Vite proxy (dev) / nginx (prod) forwards /api → backend
   timeout: 30000,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// Longer timeout for Claude API operations (trend fetch, thread build, lingo)
+const slowApi = axios.create({
+  baseURL: '',
+  timeout: 120000,
   headers: { 'Content-Type': 'application/json' },
 })
 
@@ -15,22 +22,30 @@ api.interceptors.request.use((config) => {
 })
 
 // Response interceptor — clean FastAPI errors
-api.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    const detail =
-      err?.response?.data?.detail ||
-      err?.response?.data?.message ||
-      err?.message ||
-      'An unexpected error occurred'
-    const error = new Error(
-      typeof detail === 'string' ? detail : JSON.stringify(detail)
-    )
-    error.status = err?.response?.status
-    error.raw = err
-    return Promise.reject(error)
+const errorInterceptor = (err) => {
+  const detail =
+    err?.response?.data?.detail ||
+    err?.response?.data?.error?.detail ||
+    err?.response?.data?.error?.message ||
+    err?.response?.data?.message ||
+    err?.message ||
+    'An unexpected error occurred'
+  const error = new Error(
+    typeof detail === 'string' ? detail : JSON.stringify(detail)
+  )
+  error.status = err?.response?.status
+  error.raw = err
+  return Promise.reject(error)
+}
+
+api.interceptors.response.use((res) => res, errorInterceptor)
+slowApi.interceptors.response.use((res) => res, errorInterceptor)
+slowApi.interceptors.request.use((config) => {
+  if (import.meta.env.DEV) {
+    console.debug(`[API-slow] ${config.method?.toUpperCase()} ${config.url}`)
   }
-)
+  return config
+})
 
 // ─── DESKS ────────────────────────────────────────────────────────────────
 export const getDesks = (params) =>
@@ -102,7 +117,7 @@ export const abortDraft = (id) =>
   api.post(`/api/drafts/${id}/abort`).then((r) => r.data)
 
 export const regenerateDraft = (id) =>
-  api.post(`/api/drafts/${id}/regenerate`).then((r) => r.data)
+  slowApi.post(`/api/drafts/${id}/regenerate`).then((r) => r.data)
 
 export const deleteDraft = (id) =>
   api.delete(`/api/drafts/${id}`)
@@ -112,7 +127,7 @@ export const getDraftStats = () =>
 
 // ─── AGENT ────────────────────────────────────────────────────────────────
 export const runDesk = (deskId, data = {}) =>
-  api
+  slowApi
     .post(`/api/agent/run-desk/${deskId}`, null, {
       params: {
         content_type: data.content_type || 'text',
@@ -122,10 +137,10 @@ export const runDesk = (deskId, data = {}) =>
     .then((r) => r.data)
 
 export const runAll = (mode) =>
-  api.post('/api/agent/run-all', null, { params: mode ? { mode } : {} }).then((r) => r.data)
+  slowApi.post('/api/agent/run-all', null, { params: mode ? { mode } : {} }).then((r) => r.data)
 
 export const spikeResponse = (deskId, topic) =>
-  api.post(`/api/agent/spike-response/${deskId}`, { topic }).then((r) => r.data)
+  slowApi.post(`/api/agent/spike-response/${deskId}`, { topic }).then((r) => r.data)
 
 export const getDeskTrendsLive = (deskId, fresh = false, limit = 10) =>
   api
@@ -228,20 +243,20 @@ export const getThreadTypes = () =>
   api.get('/api/threads/types').then((r) => r.data)
 
 export const buildThread = (data) =>
-  api.post('/api/threads/build', data).then((r) => r.data)
+  slowApi.post('/api/threads/build', data).then((r) => r.data)
 
 export const buildThreadsForDesk = (deskId, data) =>
-  api.post(`/api/threads/build-for-desk/${deskId}`, data).then((r) => r.data)
+  slowApi.post(`/api/threads/build-for-desk/${deskId}`, data).then((r) => r.data)
 
 export const getThread = (runId) =>
   api.get(`/api/threads/${runId}`).then((r) => r.data)
 
 export const runDeskThreads = (deskId) =>
-  api.post(`/api/threads/run-desk/${deskId}`).then((r) => r.data)
+  slowApi.post(`/api/threads/run-desk/${deskId}`).then((r) => r.data)
 
 // ─── LINGO ────────────────────────────────────────────────────────────────
 export const analyzeStyle = (handle) =>
-  api.post('/api/lingo/analyze', { handle }).then((r) => r.data)
+  slowApi.post('/api/lingo/analyze', { handle }).then((r) => r.data)
 
 export const previewStyle = (data) =>
   api.post('/api/lingo/preview', data).then((r) => r.data)
