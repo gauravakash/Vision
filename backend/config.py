@@ -50,6 +50,24 @@ class Settings(BaseSettings):
     ENGAGEMENT_AGENT_ENABLED: bool = True
     AUTO_POSTER_ENABLED: bool = True
 
+    # ---------------------------------------------------------- Production
+    LOG_LEVEL: str = "INFO"
+
+    # ---------------------------------------------------------- Rate limiting (HTTP API)
+    RATE_LIMIT_AGENT_RUN_PER_HOUR: int = 10
+    RATE_LIMIT_POSTER_PER_HOUR: int = 50
+    RATE_LIMIT_DEFAULT_PER_MINUTE: int = 200
+
+    # ---------------------------------------------------------- Cost monitoring
+    MONTHLY_COST_LIMIT_USD: float = 25.0
+    COST_ALERT_THRESHOLD_USD: float = 20.0
+    USD_TO_INR: float = 83.5
+
+    # ---------------------------------------------------------- Data retention
+    ACTIVITY_LOG_RETENTION_DAYS: int = 30
+    TREND_SNAPSHOT_RETENTION_DAYS: int = 7
+    ABORTED_DRAFT_RETENTION_DAYS: int = 14
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

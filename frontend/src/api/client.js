@@ -223,4 +223,61 @@ export const closeLoginSession = (sessionId) =>
 export const testCookies = (accountId) =>
   api.post(`/api/login/test-cookies/${accountId}`).then((r) => r.data)
 
+// ─── THREADS ──────────────────────────────────────────────────────────────
+export const getThreadTypes = () =>
+  api.get('/api/threads/types').then((r) => r.data)
+
+export const buildThread = (data) =>
+  api.post('/api/threads/build', data).then((r) => r.data)
+
+export const buildThreadsForDesk = (deskId, data) =>
+  api.post(`/api/threads/build-for-desk/${deskId}`, data).then((r) => r.data)
+
+export const getThread = (runId) =>
+  api.get(`/api/threads/${runId}`).then((r) => r.data)
+
+export const runDeskThreads = (deskId) =>
+  api.post(`/api/threads/run-desk/${deskId}`).then((r) => r.data)
+
+// ─── LINGO ────────────────────────────────────────────────────────────────
+export const analyzeStyle = (handle) =>
+  api.post('/api/lingo/analyze', { handle }).then((r) => r.data)
+
+export const previewStyle = (data) =>
+  api.post('/api/lingo/preview', data).then((r) => r.data)
+
+export const updateAccountLingo = (accountId, data) =>
+  api.patch(`/api/lingo/account/${accountId}`, data).then((r) => r.data)
+
+export const clearLingoCache = (handle) =>
+  api.delete('/api/lingo/cache', { params: handle ? { handle } : {} }).then((r) => r.data)
+
+export const getAccountLingo = (accountId) =>
+  api.get(`/api/lingo/account/${accountId}`).then((r) => r.data)
+
+// ─── ADMIN ────────────────────────────────────────────────────────────────
+export const getAdminHealth = () =>
+  api.get('/api/admin/health').then((r) => r.data)
+
+export const getAdminMetrics = () =>
+  api.get('/api/admin/metrics').then((r) => r.data)
+
+export const getAdminCosts = () =>
+  api.get('/api/admin/costs').then((r) => r.data)
+
+export const getAdminLogs = (params) =>
+  api.get('/api/admin/logs', { params }).then((r) => r.data)
+
+export const getAdminDatabaseStats = () =>
+  api.get('/api/admin/database-stats').then((r) => r.data)
+
+export const postAdminClearCaches = () =>
+  api.post('/api/admin/clear-caches').then((r) => r.data)
+
+export const postAdminTestNotification = () =>
+  api.post('/api/admin/test-notification').then((r) => r.data)
+
+export const postAdminCleanupOldData = () =>
+  api.post('/api/admin/cleanup-old-data').then((r) => r.data)
+
 export default api

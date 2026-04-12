@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom'
-import { Home, FileText, Users, LayoutGrid, Clock, Settings, Zap, MessageSquare } from 'lucide-react'
+import { Home, FileText, Users, LayoutGrid, Clock, Settings, Zap, MessageSquare, Layers } from 'lucide-react'
 import { useDesks } from '../../hooks/useDesks'
 import { usePendingDrafts } from '../../hooks/useDrafts'
 import { useCurrentSpikes } from '../../hooks/useAgent'
@@ -13,6 +13,7 @@ const NAV = [
   { path: '/desks',       icon: LayoutGrid,    label: 'Desks' },
   { path: '/history',     icon: Clock,         label: 'History' },
   { path: '/engagement',  icon: MessageSquare, label: 'Engagement' },
+  { path: '/threads',     icon: Layers,        label: 'Threads' },
 ]
 
 export default function Sidebar({ collapsed, onToggle }) {

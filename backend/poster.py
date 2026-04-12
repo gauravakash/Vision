@@ -196,6 +196,12 @@ class TweetPoster:
                 result["error"] = error
                 result["error_type"] = error_type or "post_failed"
 
+                try:
+                    from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+                    await _metrics.record_post(success=False)
+                except Exception:
+                    pass
+
                 # Notify Telegram on account warnings
                 if error_type in ("account_warning", "account_suspended"):
                     await self._send_warning_alert(account.handle, error)
@@ -206,6 +212,12 @@ class TweetPoster:
             result["success"] = True
             result["tweet_url"] = tweet_url
             result["posted_at"] = datetime.utcnow()
+
+            try:
+                from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+                await _metrics.record_post(success=True)
+            except Exception:
+                pass
 
             if settings.DEBUG:
                 self.logger.debug(

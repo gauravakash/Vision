@@ -223,6 +223,17 @@ class TrendFetcher:
             logger.error("TrendFetcher: unexpected error for desk %d: %s", desk.id, exc)
             return []
 
+        # Record metrics
+        try:
+            from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+            await _metrics.record_api_call(
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                error=False,
+            )
+        except Exception:
+            pass
+
         topics = self._parse_claude_response(response)
         validated = [self._validate_topic(t) for t in topics if t]
         validated = [t for t in validated if t is not None][:limit]
@@ -344,7 +355,15 @@ class DraftGenerator:
         is_spike_draft: bool = False,
         context: Optional[str] = None,
     ) -> Optional[Draft]:
-        system_prompt = self._prompt_builder.build_system_prompt(account)
+        # Build base system prompt then apply lingo adaptation if configured
+        base_prompt = self._prompt_builder.build_system_prompt(account)
+        try:
+            from backend.lingo_adapter import lingo_adapter as _lingo  # noqa: PLC0415
+            system_prompt = await _lingo.get_adapted_system_prompt(account, base_prompt)
+        except Exception as exc:
+            logger.warning("DraftGenerator: lingo adapter error, using base prompt: %s", exc)
+            system_prompt = base_prompt
+
         user_message = self._prompt_builder.build_draft_user_message(
             topic=topic,
             account=account,
@@ -375,6 +394,17 @@ class DraftGenerator:
             logger.error("DraftGenerator: unexpected error for %s: %s", account.handle, exc)
             return None
 
+        # Record API metrics
+        try:
+            from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+            await _metrics.record_api_call(
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                error=False,
+            )
+        except Exception:
+            pass
+
         tweet_text = self._extract_text(response)
         if not tweet_text:
             logger.warning("DraftGenerator: empty response for %s / %r", account.handle, topic)
@@ -401,6 +431,13 @@ class DraftGenerator:
             is_spike_draft=is_spike_draft,
             run_id=run_id,
         )
+
+        try:
+            from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+            await _metrics.record_draft("generated")
+        except Exception:
+            pass
+
         return draft
 
     async def generate_for_desk_run(

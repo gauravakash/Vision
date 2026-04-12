@@ -399,6 +399,12 @@ async def approve_draft(
     # Update content mix tally (fire-and-forget style, errors logged not raised)
     await _update_content_mix(db, draft.account_id, draft.desk_id, draft.content_type)
 
+    try:
+        from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+        await _metrics.record_draft("approved")
+    except Exception:
+        pass
+
     await _log_activity(
         db,
         event_type="draft_approved",
@@ -452,6 +458,12 @@ async def abort_draft(
         await db.rollback()
         logger.error("abort_draft: commit failed for draft %d: %s", draft_id, exc)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Abort failed")
+
+    try:
+        from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+        await _metrics.record_draft("aborted")
+    except Exception:
+        pass
 
     await _log_activity(
         db,

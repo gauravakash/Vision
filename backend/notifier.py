@@ -343,6 +343,46 @@ class TelegramNotifier:
         ]
         return await self._send(text, keyboard)
 
+    async def send_thread_ready(
+        self,
+        account_handle: str,
+        topic: str,
+        thread_type: str,
+        tweet_count: int,
+        tweet_previews: list[str],
+        run_id: str,
+    ) -> bool:
+        """Notify that a multi-tweet thread is ready for review."""
+        if not self._ready():
+            return False
+
+        esc = MessageFormatter.escape_md
+
+        preview_lines = ""
+        for i, text in enumerate(tweet_previews[:3], start=1):
+            short = text[:80]
+            preview_lines += f'\n{i}/ _"{esc(short)}\\.\\.\\."_'
+
+        text = (
+            "🧵 *THREAD READY*\n\n"
+            f"Account: {esc('@' + account_handle)}\n"
+            f"Topic: `{esc(topic)}`\n"
+            f"Type: {esc(thread_type.title())} · {esc(str(tweet_count))} tweets"
+            f"{preview_lines}"
+        )
+
+        keyboard = [
+            [
+                {"text": "✓ Approve All", "callback_data": f"thread_approve_all:{run_id}"},
+                {"text": "Review Each",   "callback_data": f"thread_review:{run_id}"},
+            ],
+            [
+                {"text": "✗ Abort Thread", "callback_data": f"thread_abort:{run_id}"},
+            ],
+        ]
+
+        return await self._send(text, keyboard)
+
     async def send_post_result(
         self,
         account_handle: str,
@@ -522,6 +562,80 @@ class TelegramNotifier:
             elif action == "view_opp" and len(parts) >= 2:
                 opp_id = int(parts[1])
                 return f"View opportunity at /api/watchlist/opportunities/{opp_id}"
+
+            elif action == "thread_approve_all" and len(parts) >= 2:
+                run_id = parts[1]
+                count = await self._bulk_status_update(run_id, "approved", db)
+                return f"Thread approved: {count} tweet(s)"
+
+            elif action == "thread_abort" and len(parts) >= 2:
+                run_id = parts[1]
+                count = await self._bulk_status_update(run_id, "aborted", db)
+                return f"Thread aborted: {count} tweet(s)"
+
+            elif action == "thread_review" and len(parts) >= 2:
+                run_id = parts[1]
+                from sqlalchemy import select as _select  # noqa: PLC0415
+                from backend.models import Draft as _Draft  # noqa: PLC0415
+
+                result = await db.execute(
+                    _select(_Draft).where(
+                        _Draft.run_id == run_id,
+                        _Draft.is_deleted.is_(False),
+                    ).order_by(_Draft.id)
+                )
+                thread_drafts = result.scalars().all()
+                if not thread_drafts:
+                    return "No drafts found for this thread"
+
+                esc = MessageFormatter.escape_md
+                for i, draft in enumerate(thread_drafts, start=1):
+                    preview = draft.final_text[:120]
+                    tweet_text = (
+                        f"🧵 Tweet {i}/{len(thread_drafts)}\n\n"
+                        f"_{esc(preview)}_"
+                    )
+                    tweet_keyboard = [
+                        [
+                            {"text": "✓ Approve", "callback_data": f"tweet_approve:{draft.id}"},
+                            {"text": "✗ Abort",   "callback_data": f"tweet_abort:{draft.id}"},
+                        ]
+                    ]
+                    await self._send(tweet_text, tweet_keyboard)
+
+                return f"Sent {len(thread_drafts)} tweets for review"
+
+            elif action == "tweet_approve" and len(parts) >= 2:
+                draft_id = int(parts[1])
+                from sqlalchemy import select as _select  # noqa: PLC0415
+                from backend.models import Draft as _Draft  # noqa: PLC0415
+
+                result = await db.execute(
+                    _select(_Draft).where(_Draft.id == draft_id)
+                )
+                draft = result.scalar_one_or_none()
+                if draft is None:
+                    return "Tweet not found"
+                draft.status = "approved"
+                draft.approved_at = datetime.utcnow()
+                await db.commit()
+                return f"Tweet {draft_id} approved"
+
+            elif action == "tweet_abort" and len(parts) >= 2:
+                draft_id = int(parts[1])
+                from sqlalchemy import select as _select  # noqa: PLC0415
+                from backend.models import Draft as _Draft  # noqa: PLC0415
+
+                result = await db.execute(
+                    _select(_Draft).where(_Draft.id == draft_id)
+                )
+                draft = result.scalar_one_or_none()
+                if draft is None:
+                    return "Tweet not found"
+                draft.status = "aborted"
+                draft.aborted_at = datetime.utcnow()
+                await db.commit()
+                return f"Tweet {draft_id} aborted"
 
             else:
                 self.logger.warning("Telegram callback: unrecognised action %r", action)

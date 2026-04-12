@@ -5,7 +5,7 @@ import { useDesks } from '../hooks/useDesks'
 import AccountCard from '../components/account/AccountCard'
 import Modal from '../components/ui/Modal'
 import { SkeletonCard } from '../components/ui/Spinner'
-import { startLogin, checkLoginStatus } from '../api/client'
+import { startLogin, checkLoginStatus, analyzeStyle, previewStyle } from '../api/client'
 import { TONES, STYLES, STANCES } from '../utils/constants'
 import toast from 'react-hot-toast'
 
@@ -103,8 +103,52 @@ function LoginBrowser({ account, onSuccess }) {
 function AccountForm({ initial, desks, onSave, onCancel }) {
   const [form, setForm] = useState({ ...EMPTY_FORM, ...initial })
   const [step, setStep] = useState(initial?.id ? 1 : 0) // 0=login, 1=configure
+  const [lingoAnalyzing, setLingoAnalyzing] = useState(false)
+  const [lingoPreviewing, setLingoPreviewing] = useState(false)
+  const [lingoProfile, setLingoProfile] = useState(null)
+  const [lingoPreviewTweet, setLingoPreviewTweet] = useState(null)
 
   function set(key, val) { setForm((f) => ({ ...f, [key]: val })) }
+
+  async function handleAnalyzeStyle() {
+    const handle = (form.lingo_reference_handle || '').trim()
+    if (!handle) { toast.error('Enter a reference handle first'); return }
+    setLingoAnalyzing(true)
+    setLingoProfile(null)
+    setLingoPreviewTweet(null)
+    try {
+      const result = await analyzeStyle(handle)
+      setLingoProfile(result.profile)
+      toast.success(`Style analyzed for @${handle}`)
+    } catch (e) {
+      toast.error(e.message || 'Analysis failed')
+    } finally {
+      setLingoAnalyzing(false)
+    }
+  }
+
+  async function handlePreviewTweet() {
+    const handle = (form.lingo_reference_handle || '').trim()
+    if (!handle) { toast.error('Enter a reference handle first'); return }
+    setLingoPreviewing(true)
+    setLingoPreviewTweet(null)
+    try {
+      const result = await previewStyle({
+        reference_handle: handle,
+        sample_topic: 'current events and their implications',
+        intensity: form.lingo_intensity,
+      })
+      setLingoPreviewTweet(result.sample_tweet)
+      if (!lingoProfile && result.style_profile) {
+        setLingoProfile(result.style_profile)
+      }
+      toast.success('Preview generated')
+    } catch (e) {
+      toast.error(e.message || 'Preview failed')
+    } finally {
+      setLingoPreviewing(false)
+    }
+  }
 
   function toggleDesk(id) {
     set('desk_ids', form.desk_ids.includes(id)
@@ -212,17 +256,63 @@ function AccountForm({ initial, desks, onSave, onCancel }) {
               className="draft-textarea" />
           </div>
 
-          {/* Lingo */}
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Lingo handle" value={form.lingo_reference_handle} onChange={(v) => set('lingo_reference_handle', v)} placeholder="@handle" />
-            <div>
-              <label className="text-xs font-semibold text-text-muted uppercase tracking-wide block mb-1.5">
-                Lingo intensity: {form.lingo_intensity}%
-              </label>
-              <input type="range" min={0} max={100} value={form.lingo_intensity}
-                onChange={(e) => set('lingo_intensity', Number(e.target.value))}
-                className="w-full accent-orange" />
+          {/* Lingo Adapt */}
+          <div className="rounded-2xl border p-4 space-y-3" style={{ borderColor: 'rgba(0,0,0,0.08)', background: '#FDFAF6' }}>
+            <p className="text-xs font-bold text-text-muted uppercase tracking-wider">Lingo Adapt</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Reference Account" value={form.lingo_reference_handle} onChange={(v) => { set('lingo_reference_handle', v); setLingoProfile(null); setLingoPreviewTweet(null) }} placeholder="@naval" />
+              <div>
+                <label className="text-xs font-semibold text-text-muted uppercase tracking-wide block mb-1.5">
+                  Intensity: {form.lingo_intensity}%
+                </label>
+                <input type="range" min={0} max={100} value={form.lingo_intensity}
+                  onChange={(e) => set('lingo_intensity', Number(e.target.value))}
+                  className="w-full accent-orange" />
+                <div className="flex justify-between text-xs text-text-muted mt-0.5">
+                  <span>Subtle</span><span>Blended</span><span>Full</span>
+                </div>
+              </div>
             </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleAnalyzeStyle}
+                disabled={lingoAnalyzing}
+                className="flex-1 py-1.5 rounded-xl text-xs font-semibold border transition-all disabled:opacity-50"
+                style={{ borderColor: 'rgba(255,92,26,0.3)', color: '#FF5C1A' }}
+              >
+                {lingoAnalyzing ? 'Analyzing…' : 'Analyze Style'}
+              </button>
+              <button
+                type="button"
+                onClick={handlePreviewTweet}
+                disabled={lingoPreviewing}
+                className="flex-1 py-1.5 rounded-xl text-xs font-semibold border transition-all disabled:opacity-50"
+                style={{ borderColor: 'rgba(24,95,165,0.3)', color: '#185FA5' }}
+              >
+                {lingoPreviewing ? 'Generating…' : 'Preview Tweet'}
+              </button>
+            </div>
+            {lingoProfile && (
+              <div className="space-y-1 pt-1 border-t text-xs" style={{ borderColor: 'rgba(0,0,0,0.07)' }}>
+                <p className="font-semibold text-text-muted uppercase tracking-wide pt-1">Style Profile</p>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-text-secondary">
+                  <span>Sentences: <b>{lingoProfile.avg_sentence_length}</b></span>
+                  <span>Vocab: <b>{lingoProfile.vocabulary_level?.split(' - ')[0]}</b></span>
+                  <span>Opens with: <b>{lingoProfile.opener_style}</b></span>
+                  <span>Directness: <b>{lingoProfile.directness_level}</b></span>
+                </div>
+                {lingoProfile.style_summary && (
+                  <p className="text-text-muted italic pt-0.5">"{lingoProfile.style_summary}"</p>
+                )}
+              </div>
+            )}
+            {lingoPreviewTweet && (
+              <div className="rounded-xl border p-3 text-sm" style={{ borderColor: 'rgba(24,95,165,0.2)', background: 'rgba(24,95,165,0.04)' }}>
+                <p className="text-xs font-semibold text-text-muted mb-1">This is how drafts will sound:</p>
+                <p className="text-text-primary leading-relaxed">{lingoPreviewTweet}</p>
+              </div>
+            )}
           </div>
 
           <div className="flex gap-2 pt-1">

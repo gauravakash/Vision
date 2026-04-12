@@ -35,7 +35,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.config import settings
 from backend.database import AsyncSessionLocal, close_db, init_db
+from backend.error_handlers import (
+    general_exception_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
 from backend.logging_config import get_logger, setup_logging
+from backend.middleware import (
+    RateLimitMiddleware,
+    RequestIDMiddleware,
+    RequestLoggingMiddleware,
+)
 
 logger = get_logger(__name__)
 
@@ -74,6 +84,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── 2. Database ───────────────────────────────────────────────────
     await init_db()
+
+    # ── 2b. Startup validation ────────────────────────────────────────
+    try:
+        from backend.security import validate_cookie_encrypt_key  # noqa: PLC0415
+        if not validate_cookie_encrypt_key(settings.COOKIE_ENCRYPT_KEY):
+            logger.critical(
+                "COOKIE_ENCRYPT_KEY is not a valid Fernet key — "
+                "cookie encryption will fail. Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+    except Exception as exc:
+        logger.warning("Startup key validation error (non-fatal): %s", exc)
 
     # ── 3. LoginManager ───────────────────────────────────────────────
     try:
@@ -164,9 +186,10 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# Middleware
+# Middleware (order matters: added last = executed first)
 # ---------------------------------------------------------------------------
 
+# CORS must come before rate limiting so preflight requests pass through
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -177,76 +200,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.middleware("http")
-async def request_logging_middleware(request: Request, call_next: Any) -> Any:
-    """Log method, path, status code, and processing time for every request."""
-    start = time.monotonic()
-    response = await call_next(request)
-    process_ms = round((time.monotonic() - start) * 1000, 2)
-    logger.info(
-        "%s %s → %d  (%.2f ms)",
-        request.method,
-        request.url.path,
-        response.status_code,
-        process_ms,
-    )
-    return response
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(RequestIDMiddleware)
 
 
 # ---------------------------------------------------------------------------
 # Exception handlers
 # ---------------------------------------------------------------------------
 
-
-@app.exception_handler(StarletteHTTPException)
-async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "detail": exc.detail,
-            "status_code": exc.status_code,
-            "timestamp": datetime.utcnow().isoformat(),
-        },
-    )
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
-    errors = []
-    for error in exc.errors():
-        errors.append(
-            {
-                "field": " → ".join(str(loc) for loc in error["loc"]),
-                "message": error["msg"],
-                "type": error["type"],
-            }
-        )
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={
-            "detail": "Validation error",
-            "errors": errors,
-            "status_code": 422,
-            "timestamp": datetime.utcnow().isoformat(),
-        },
-    )
-
-
-@app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "detail": "An internal server error occurred. Please try again later.",
-            "status_code": 500,
-            "timestamp": datetime.utcnow().isoformat(),
-        },
-    )
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +220,11 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 
 @app.get("/health", tags=["System"])
-async def health_check() -> dict[str, Any]:
+async def health_check() -> Any:
     """
     Live health status for monitoring / load-balancer probes.
 
-    Checks: database, scheduler, telegram, spike detector.
+    Fast check: DB ping only. For full subsystem health use GET /api/admin/health.
     """
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -271,62 +236,17 @@ async def health_check() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Health check DB ping failed: %s", exc)
 
-    # Scheduler info
-    scheduler_info: dict[str, Any] = {
-        "running": False,
-        "job_count": 0,
-        "next_run": None,
-    }
-    try:
-        from backend.scheduler import scheduler as _scheduler  # noqa: PLC0415
-
-        next_runs = _scheduler.get_next_runs()
-        scheduler_info = {
-            "running": _scheduler.is_running,
-            "job_count": len(_scheduler.scheduler.get_jobs()),
-            "next_run": next_runs[0]["next_run_ist"] if next_runs else None,
-        }
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Telegram info
-    telegram_info: dict[str, Any] = {"configured": False}
-    try:
-        from backend.notifier import notifier as _notifier  # noqa: PLC0415
-
-        telegram_info = {"configured": _notifier.is_configured}
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Spike detector info
-    spike_info: dict[str, Any] = {"last_check": None, "active_spikes": 0}
-    try:
-        from backend.spike_detector import spike_detector as _detector  # noqa: PLC0415
-
-        async with AsyncSessionLocal() as db:
-            active = len(await _detector.get_current_spikes(db))
-
-        spike_info = {
-            "last_check": (
-                _detector._last_check_time.isoformat()
-                if _detector._last_check_time
-                else None
-            ),
-            "active_spikes": active,
-        }
-    except Exception:  # noqa: BLE001
-        pass
-
-    return {
-        "status": "healthy" if db_status == "connected" else "degraded",
-        "version": settings.APP_VERSION,
-        "database": db_status,
-        "scheduler": scheduler_info,
-        "telegram": telegram_info,
-        "spike_detector": spike_info,
-        "timestamp": datetime.utcnow().isoformat(),
-        "uptime_seconds": round(time.monotonic() - _START_TIME, 2),
-    }
+    overall = "healthy" if db_status == "connected" else "degraded"
+    return JSONResponse(
+        status_code=200 if overall == "healthy" else 503,
+        content={
+            "status": overall,
+            "version": settings.APP_VERSION,
+            "database": db_status,
+            "timestamp": datetime.utcnow().isoformat(),
+            "uptime_seconds": round(time.monotonic() - _START_TIME, 2),
+        },
+    )
 
 
 @app.get("/", response_class=HTMLResponse, tags=["System"])
@@ -441,6 +361,9 @@ _ROUTER_CONFIGS = [
     ("backend.routers.login",      "/api/login",      ["login"]),
     ("backend.routers.engagement", "/api/engagement", ["engagement"]),
     ("backend.routers.poster",     "/api/poster",     ["poster"]),
+    ("backend.routers.threads",    "/api/threads",    ["threads"]),
+    ("backend.routers.lingo",      "/api/lingo",      ["lingo"]),
+    ("backend.routers.admin",      "/api/admin",      ["admin"]),
 ]
 
 for _module_path, _prefix, _tags in _ROUTER_CONFIGS:

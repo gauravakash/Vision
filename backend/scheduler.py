@@ -106,6 +106,12 @@ async def job_run_desk(desk_id: int) -> None:
             result_data.get("drafts_created", 0),
         )
 
+        try:
+            from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+            await _metrics.record_scheduler_run()
+        except Exception:
+            pass
+
         # Notify if drafts were created
         drafts_created = result_data.get("drafts_created", 0)
         run_id = result_data.get("run_id")
@@ -377,6 +383,91 @@ async def job_expire_opportunities() -> None:
             await db.close()
 
 
+async def job_weekly_threads() -> None:
+    """
+    APScheduler job: build threads for all auto-mode desks.
+
+    Runs every Tuesday and Thursday at 9 AM IST.
+    Threads are high-value content scheduled separately from regular tweets.
+    """
+    db: Optional[AsyncSession] = None
+    try:
+        db = AsyncSessionLocal()
+        from backend.agent import TrendFetcher  # noqa: PLC0415
+        from backend.thread_builder import thread_builder as _tb  # noqa: PLC0415
+
+        result = await db.execute(
+            select(Desk).where(
+                Desk.is_active.is_(True),
+                Desk.is_deleted.is_(False),
+                Desk.mode == "auto",
+            )
+        )
+        desks: list[Desk] = result.scalars().all()
+
+        fetcher = TrendFetcher()
+        total_threads = 0
+
+        for desk in desks:
+            try:
+                topics = await fetcher.fetch_for_desk(desk, db)
+                if not topics:
+                    logger.info("job_weekly_threads: no topics for desk %d (%s)", desk.id, desk.name)
+                    continue
+
+                top = topics[0]
+                if "topic_tag" in top and "tag" not in top:
+                    top["tag"] = top["topic_tag"]
+
+                thread_results = await _tb.build_for_desk(
+                    desk_id=desk.id,
+                    topic=top,
+                    thread_type="analysis",
+                    db=db,
+                )
+
+                successful = [r for r in thread_results if r.get("success")]
+                total_threads += len(successful)
+
+                if successful:
+                    try:
+                        from backend.notifier import notifier as _notifier  # noqa: PLC0415
+                        if _notifier.is_configured:
+                            first = successful[0]
+                            tweet_previews = [t["text"][:80] for t in first.get("tweets", [])[:3]]
+                            await _notifier.send_thread_ready(
+                                account_handle=first.get("account_handle", ""),
+                                topic=first.get("topic", ""),
+                                thread_type=first.get("thread_type", "analysis"),
+                                tweet_count=first.get("tweet_count", 0),
+                                tweet_previews=tweet_previews,
+                                run_id=first.get("run_id", ""),
+                            )
+                    except Exception as exc:
+                        logger.error("job_weekly_threads: notification failed: %s", exc)
+
+                logger.info(
+                    "job_weekly_threads: desk %d (%s) → %d thread(s) built",
+                    desk.id, desk.name, len(successful),
+                )
+
+            except Exception as exc:
+                logger.error(
+                    "job_weekly_threads: error for desk %d: %s\n%s",
+                    desk.id, exc, traceback.format_exc(),
+                )
+
+        logger.info("job_weekly_threads: complete — total_threads=%d", total_threads)
+
+    except Exception as exc:
+        logger.error(
+            "job_weekly_threads: unhandled error: %s\n%s", exc, traceback.format_exc()
+        )
+    finally:
+        if db is not None:
+            await db.close()
+
+
 async def job_mark_expired_drafts() -> None:
     """
     APScheduler job: auto-abort drafts that have been pending too long.
@@ -419,6 +510,67 @@ async def job_mark_expired_drafts() -> None:
         )
         if db is not None:
             await db.rollback()
+    finally:
+        if db is not None:
+            await db.close()
+
+
+async def job_weekly_cleanup() -> None:
+    """
+    APScheduler job: delete old activity logs, trend snapshots, and aborted drafts.
+
+    Runs every Sunday at 3 AM IST. Mirrors the admin /cleanup-old-data endpoint.
+    """
+    db: Optional[AsyncSession] = None
+    try:
+        db = AsyncSessionLocal()
+        from datetime import timedelta  # noqa: PLC0415 (already imported at top)
+        from sqlalchemy import delete  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+        from backend.models import ActivityLog, Draft, TrendSnapshot  # noqa: PLC0415
+
+        now = datetime.utcnow()
+        deleted: dict[str, int] = {}
+
+        cutoff_activity = now - timedelta(days=settings.ACTIVITY_LOG_RETENTION_DAYS)
+        r = await db.execute(
+            delete(ActivityLog).where(ActivityLog.created_at < cutoff_activity)
+        )
+        deleted["activity_logs"] = r.rowcount
+
+        cutoff_trends = now - timedelta(days=settings.TREND_SNAPSHOT_RETENTION_DAYS)
+        r = await db.execute(
+            delete(TrendSnapshot).where(TrendSnapshot.snapshot_time < cutoff_trends)
+        )
+        deleted["trend_snapshots"] = r.rowcount
+
+        cutoff_drafts = now - timedelta(days=settings.ABORTED_DRAFT_RETENTION_DAYS)
+        from sqlalchemy import select  # noqa: PLC0415
+        r2 = await db.execute(
+            select(Draft).where(
+                Draft.status == "aborted",
+                Draft.created_at < cutoff_drafts,
+                Draft.is_deleted.is_(False),
+            )
+        )
+        old_aborted = r2.scalars().all()
+        for d in old_aborted:
+            d.is_deleted = True
+        deleted["aborted_drafts"] = len(old_aborted)
+
+        await db.commit()
+        total = sum(deleted.values())
+        logger.info("job_weekly_cleanup: deleted %d records: %s", total, deleted)
+
+    except Exception as exc:
+        logger.error(
+            "job_weekly_cleanup: error: %s\n%s", exc, traceback.format_exc()
+        )
+        if db is not None:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
     finally:
         if db is not None:
             await db.close()
@@ -552,9 +704,39 @@ class AgentScheduler:
             coalesce=True,
         )
 
+        self.scheduler.add_job(
+            job_weekly_threads,
+            CronTrigger(
+                day_of_week="tue,thu",
+                hour=9,
+                minute=0,
+                timezone="Asia/Kolkata",
+            ),
+            id="system_weekly_threads",
+            replace_existing=True,
+            misfire_grace_time=300,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        self.scheduler.add_job(
+            job_weekly_cleanup,
+            CronTrigger(
+                day_of_week="sun",
+                hour=3,
+                minute=0,
+                timezone="Asia/Kolkata",
+            ),
+            id="system_weekly_cleanup",
+            replace_existing=True,
+            misfire_grace_time=300,
+            max_instances=1,
+            coalesce=True,
+        )
+
         total = len(self.scheduler.get_jobs())
         self.logger.info(
-            "AgentScheduler: setup complete. desk_jobs=%d system_jobs=8 total=%d",
+            "AgentScheduler: setup complete. desk_jobs=%d system_jobs=10 total=%d",
             desk_jobs_added, total,
         )
 

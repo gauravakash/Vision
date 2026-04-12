@@ -7,6 +7,7 @@ import Desks from './pages/Desks'
 import History from './pages/History'
 import Settings from './pages/Settings'
 import Engagement from './pages/Engagement'
+import Threads from './pages/Threads'
 
 const router = createBrowserRouter([
   {
@@ -20,6 +21,7 @@ const router = createBrowserRouter([
       { path: 'history',       element: <History /> },
       { path: 'settings',      element: <Settings /> },
       { path: 'engagement',    element: <Engagement /> },
+      { path: 'threads',       element: <Threads /> },
     ],
   },
 ])
