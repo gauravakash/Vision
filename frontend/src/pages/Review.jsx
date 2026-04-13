@@ -10,10 +10,8 @@ import toast from 'react-hot-toast'
 
 export default function Review() {
   const { data: pending = [], isLoading, dataUpdatedAt } = usePendingDrafts()
-  const desksData = useDesks().data || {}
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
-  const accountsData = useAccounts().data || {}
-  const accounts = Array.isArray(accountsData?.items) ? accountsData.items : []
+  const { data: desks = [] } = useDesks()
+  const { data: accounts = [] } = useAccounts()
   const approve = useApproveDraft()
   const abort = useAbortDraft()
   const runDesk = useRunDesk()

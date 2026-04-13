@@ -273,8 +273,7 @@ export default function Engagement() {
   const [filterDesk, setFilterDesk] = useState('')
   const [filterStatus, setFilterStatus] = useState('pending')
 
-  const desksData = useDesks().data || {}
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
+  const { data: desks = [] } = useDesks()
 
   const { data: opportunities = [], isLoading: oppsLoading } = useQuery({
     queryKey: ['opportunities', filterDesk, filterStatus],

@@ -43,7 +43,7 @@ function ActivityFeed({ events }) {
 }
 
 export default function Home() {
-  const { data: desksData = {} } = useDesks()
+  const { data: desks = [], isLoading: desksLoading } = useDesks()
   const { data: pending = [] } = usePendingDrafts()
   const { data: stats } = useDraftStats()
   const { data: spikes = [] } = useCurrentSpikes()
@@ -70,7 +70,6 @@ export default function Home() {
     return () => clearInterval(interval)
   }, [scheduler])
 
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
   const activeSpikes = spikes.filter((s) => !dismissedSpikes.has(s.topic_tag))
   const activeDesks = desks.filter((d) => d.is_active)
   const pendingCount = Array.isArray(pending) ? pending.length : 0

@@ -157,10 +157,8 @@ function DeskForm({ initial, onSave, onCancel }) {
 }
 
 export default function Desks() {
-  const { data: desksData = {}, isLoading } = useDesks()
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
-  const accountsData = useAccounts().data || {}
-  const accounts = Array.isArray(accountsData?.items) ? accountsData.items : []
+  const { data: desks = [], isLoading } = useDesks()
+  const { data: accounts = [] } = useAccounts()
   const createDesk = useCreateDesk()
   const updateDesk = useUpdateDesk()
   const deleteDesk = useDeleteDesk()

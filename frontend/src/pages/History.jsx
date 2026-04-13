@@ -26,10 +26,8 @@ export default function History() {
   const [filterStatus, setFilterStatus] = useState('')
 
   const { data: stats, isLoading: statsLoading } = useDraftStats()
-  const desksData = useDesks().data || {}
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
-  const accountsData = useAccounts().data || {}
-  const accounts = Array.isArray(accountsData?.items) ? accountsData.items : []
+  const { data: desks = [] } = useDesks()
+  const { data: accounts = [] } = useAccounts()
 
   const params = {
     limit: PAGE_SIZE,

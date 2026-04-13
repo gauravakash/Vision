@@ -187,8 +187,7 @@ function ThreadResult({ result, onRefresh }) {
 
 export default function Threads() {
   const { data: accounts = [] } = useAccounts()
-  const desksData = useDesks().data || {}
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
+  const { data: desks = [] } = useDesks()
 
   const [threadTypes, setThreadTypes] = useState({})
   const [selectedType, setSelectedType] = useState('analysis')

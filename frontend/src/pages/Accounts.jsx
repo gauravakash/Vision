@@ -352,8 +352,7 @@ function Field({ label, value, onChange, type = 'text', placeholder, maxLength }
 
 export default function Accounts() {
   const { data: accounts = [], isLoading } = useAccounts()
-  const desksData = useDesks().data || {}
-  const desks = Array.isArray(desksData?.items) ? desksData.items : []
+  const { data: desks = [] } = useDesks()
   // const { data: desks = [] } = useDesks()
   const createAcc = useCreateAccount()
   const updateAcc = useUpdateAccount()

@@ -10,6 +10,12 @@ export function useAccounts(params) {
     queryKey: ['accounts', params],
     queryFn: () => getAccounts(params),
     staleTime: 30000,
+    select: (data) => {
+      // API returns { items: [...], total: N } — normalize to flat array
+      if (Array.isArray(data)) return data
+      if (data?.items && Array.isArray(data.items)) return data.items
+      return []
+    },
   })
 }
 
