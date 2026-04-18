@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { RefreshCw, Play, Zap, X } from 'lucide-react'
 import { useDesks } from '../hooks/useDesks'
 import { usePendingDrafts, useDraftStats } from '../hooks/useDrafts'
-import { useActivity, useCurrentSpikes, useRunDesk, useRunAll, useRunSpikeCheck, useSchedulerStatus } from '../hooks/useAgent'
+import { useActivity, useCurrentSpikes, useRunDesk, useRunAll, useRunSpikeCheck, useSchedulerStatus, useRefreshAllTrends } from '../hooks/useAgent'
 import DeskCard from '../components/desk/DeskCard'
 import { SkeletonCard } from '../components/ui/Spinner'
 import { timeAgo, formatVolume } from '../utils/formatters'
@@ -52,6 +52,7 @@ export default function Home() {
   const runDesk = useRunDesk()
   const runAll = useRunAll()
   const spikeCheck = useRunSpikeCheck()
+  const refreshTrends = useRefreshAllTrends()
 
   const [dismissedSpikes, setDismissedSpikes] = useState(new Set())
   const [countdown, setCountdown] = useState('—')
@@ -86,12 +87,22 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => spikeCheck.mutate()}
+            onClick={() => refreshTrends.mutate()}
+            disabled={refreshTrends.isPending}
             className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border transition-colors hover:bg-cream"
             style={{ borderColor: 'rgba(0,0,0,0.1)', color: '#5C4D42' }}
           >
-            <RefreshCw size={15} className={spikeCheck.isPending ? 'animate-spin' : ''} />
-            Refresh Trends
+            <RefreshCw size={15} className={refreshTrends.isPending ? 'animate-spin' : ''} />
+            Fetch Trends
+          </button>
+          <button
+            onClick={() => spikeCheck.mutate()}
+            disabled={spikeCheck.isPending}
+            className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium border transition-colors hover:bg-cream"
+            style={{ borderColor: 'rgba(0,0,0,0.1)', color: '#5C4D42' }}
+          >
+            <Zap size={15} className={spikeCheck.isPending ? 'animate-pulse' : ''} />
+            Spike Check
           </button>
           <button
             onClick={() => runAll.mutate()}

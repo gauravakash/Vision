@@ -108,8 +108,31 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables ready.")
 
+    await check_and_migrate()
     await _seed_default_data()
 
+async def check_and_migrate() -> None:
+    """Run basic schema migrations for SQLite by attempting to add columns."""
+    from sqlalchemy import text
+    migrations = [
+        "ALTER TABLE accounts ADD COLUMN cookies_encrypted TEXT;",
+        "ALTER TABLE accounts ADD COLUMN cookie_expiry DATETIME;",
+        "ALTER TABLE accounts ADD COLUMN is_connected BOOLEAN NOT NULL DEFAULT 0;",
+        "ALTER TABLE accounts ADD COLUMN last_login_at DATETIME;",
+        "ALTER TABLE accounts ADD COLUMN lingo_reference_handle VARCHAR(50);",
+        "ALTER TABLE accounts ADD COLUMN lingo_intensity INTEGER NOT NULL DEFAULT 50;",
+        "ALTER TABLE reply_drafts ADD COLUMN post_attempt_at DATETIME;",
+        "ALTER TABLE reply_drafts ADD COLUMN tweet_url_after_post VARCHAR(300);",
+        "ALTER TABLE reply_drafts ADD COLUMN post_error TEXT;",
+        "ALTER TABLE drafts ADD COLUMN run_id VARCHAR(36);",
+    ]
+    async with engine.begin() as conn:
+        for stmt in migrations:
+            try:
+                await conn.execute(text(stmt))
+            except Exception as exc:
+                if "duplicate column name" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                    logger.debug("Migration note: %s", exc)
 
 async def _seed_default_data() -> None:
     """Insert seed desks if the desks table is empty."""

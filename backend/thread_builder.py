@@ -182,7 +182,12 @@ class ThreadBuilder:
 
         # 7. Call Claude API
         try:
-            response = await self._call_plain(system_prompt, user_message, max_tokens=3000)
+            response = await self._call_plain(system_prompt, user_message, max_tokens=2500)
+            if hasattr(response, "usage") and getattr(response.usage, "output_tokens", 0) > 2000:
+                self.logger.warning(
+                    "ThreadBuilder: High token consumption for %s! tokens=%d max=2500", 
+                    account.handle, response.usage.output_tokens
+                )
             raw_text = self._extract_text(response)
             parsed_tweets = self._parse_thread_response(raw_text, tweet_count)
         except anthropic.RateLimitError:

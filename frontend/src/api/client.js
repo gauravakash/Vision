@@ -89,7 +89,7 @@ export const deleteAccount = (id) =>
   api.delete(`/api/accounts/${id}`)
 
 export const getAccountStatus = (id) =>
-  api.get(`/api/accounts/${id}`).then((r) => r.data)
+  api.get(`/api/accounts/${id}/status`).then((r) => r.data)
 
 export const disconnectAccount = (id) =>
   api.post(`/api/accounts/${id}/disconnect`).then((r) => r.data)
@@ -230,13 +230,19 @@ export const checkLoginStatus = (sessionId) =>
   api.get(`/api/login/status/${sessionId}`).then((r) => r.data)
 
 export const saveLoginCookies = (sessionId, accountId) =>
-  api.post(`/api/login/save/${sessionId}/${accountId}`).then((r) => r.data)
+  api.post(`/api/login/save/${sessionId}`, { account_id: accountId }).then((r) => r.data)
 
 export const closeLoginSession = (sessionId) =>
   api.post(`/api/login/close/${sessionId}`).then((r) => r.data)
 
 export const testCookies = (accountId) =>
   api.post(`/api/login/test-cookies/${accountId}`).then((r) => r.data)
+
+export const exportCookies = (accountId) =>
+  api.get(`/api/login/export-cookies/${accountId}`).then((r) => r.data)
+
+export const importCookies = (accountId, cookies) =>
+  api.post('/api/login/import-cookies', { account_id: accountId, cookies }).then((r) => r.data)
 
 // ─── THREADS ──────────────────────────────────────────────────────────────
 export const getThreadTypes = () =>

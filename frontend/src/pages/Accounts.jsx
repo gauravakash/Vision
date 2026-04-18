@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Plus, Users } from 'lucide-react'
 import { useAccounts, useCreateAccount, useUpdateAccount, useDeleteAccount } from '../hooks/useAccounts'
 import { useDesks } from '../hooks/useDesks'
+import { useQueryClient } from '@tanstack/react-query'
 import AccountCard from '../components/account/AccountCard'
 import Modal from '../components/ui/Modal'
 import { SkeletonCard } from '../components/ui/Spinner'
@@ -20,7 +21,7 @@ function LoginBrowser({ account, onSuccess }) {
   const [status, setStatus] = useState('idle') // idle | waiting | success | error
   const [sessionId, setSessionId] = useState(null)
   const [handle, setHandle] = useState('')
-  const [pollRef, setPollRef] = useState(null)
+  const pollRef = useRef(null)
 
   async function openBrowser() {
     if (!account?.id) { toast.error('Save the account first'); return }
@@ -40,11 +41,11 @@ function LoginBrowser({ account, onSuccess }) {
           }
         } catch { clearInterval(interval); setStatus('error') }
       }, 3000)
-      setPollRef(interval)
+      pollRef.current = interval
     } catch (e) { setStatus('error'); toast.error(e.message) }
   }
 
-  useEffect(() => () => clearInterval(pollRef), [pollRef])
+  useEffect(() => () => clearInterval(pollRef.current), [])
 
   return (
     <div className="rounded-2xl border overflow-hidden" style={{ borderColor: 'rgba(0,0,0,0.1)' }}>
@@ -100,9 +101,11 @@ function LoginBrowser({ account, onSuccess }) {
   )
 }
 
-function AccountForm({ initial, desks, onSave, onCancel }) {
+function AccountForm({ initial, desks, onSave, onCancel, onLoginSuccess, isSaving }) {
   const [form, setForm] = useState({ ...EMPTY_FORM, ...initial })
-  const [step, setStep] = useState(initial?.id ? 1 : 0) // 0=login, 1=configure
+  // New accounts: start at configure (step 1) since login needs a saved account ID
+  // Existing accounts: start at configure (step 1) — user can access login from AccountCard
+  const [step, setStep] = useState(1)
   const [lingoAnalyzing, setLingoAnalyzing] = useState(false)
   const [lingoPreviewing, setLingoPreviewing] = useState(false)
   const [lingoProfile, setLingoProfile] = useState(null)
@@ -158,9 +161,9 @@ function AccountForm({ initial, desks, onSave, onCancel }) {
 
   return (
     <div className="space-y-5">
-      {step === 0 && (
+      {step === 0 && initial?.id && (
         <>
-          <LoginBrowser account={form} onSuccess={() => setStep(1)} />
+          <LoginBrowser account={initial} onSuccess={() => { setStep(1); onLoginSuccess?.() }} />
           <div className="flex items-center justify-between mt-2">
             <button onClick={onCancel} className="text-sm text-text-muted hover:text-text-primary">Cancel</button>
             <button onClick={() => setStep(1)} className="text-sm text-orange underline">Skip → configure</button>
@@ -316,15 +319,50 @@ function AccountForm({ initial, desks, onSave, onCancel }) {
           </div>
 
           <div className="flex gap-2 pt-1">
-            <button onClick={onCancel} className="flex-1 py-2 rounded-xl border text-sm text-text-secondary" style={{ borderColor: 'rgba(0,0,0,0.1)' }}>
+            <button onClick={onCancel} className="flex-1 py-2 rounded-xl border text-sm text-text-secondary h-10" style={{ borderColor: 'rgba(0,0,0,0.1)' }}>
               Cancel
             </button>
+            {initial?.id && (
+              <div className="flex flex-col gap-1.5 flex-[1.2]">
+                <button
+                  onClick={() => setStep(0)}
+                  className="h-10 rounded-xl border text-sm font-medium text-orange w-full whitespace-nowrap px-2"
+                  style={{ borderColor: 'rgba(255,92,26,0.3)' }}
+                >
+                  Connect Login
+                </button>
+                <div className="flex gap-1.5">
+                  <button onClick={async () => {
+                    try {
+                      const res = await import('../api/client').then(m => m.exportCookies(initial.id));
+                      navigator.clipboard.writeText(JSON.stringify(res.cookies));
+                      import('react-hot-toast').then(m => m.toast.success('Cookies copied!'));
+                    } catch (e) { import('react-hot-toast').then(m => m.toast.error(e.message || 'Export failed')); }
+                  }} className="flex-1 py-1 rounded border text-[10px] text-text-secondary uppercase font-semibold" style={{ background: 'rgba(0,0,0,0.02)', borderColor: 'rgba(0,0,0,0.1)' }}>
+                    Export
+                  </button>
+                  <button onClick={async () => {
+                    const json = prompt('Paste exported cookies JSON:');
+                    if (!json) return;
+                    try {
+                       const cookies = JSON.parse(json);
+                       await import('../api/client').then(m => m.importCookies(initial.id, cookies));
+                       import('react-hot-toast').then(m => m.toast.success('Cookies imported!'));
+                       onLoginSuccess?.();
+                    } catch (e) { import('react-hot-toast').then(m => m.toast.error('Invalid JSON or error')); }
+                  }} className="flex-1 py-1 rounded border text-[10px] text-text-secondary uppercase font-semibold" style={{ background: 'rgba(0,0,0,0.02)', borderColor: 'rgba(0,0,0,0.1)' }}>
+                    Import
+                  </button>
+                </div>
+              </div>
+            )}
             <button
               onClick={() => onSave(form)}
-              className="flex-1 py-2 rounded-xl text-sm font-semibold text-white"
+              disabled={isSaving}
+              className="flex-1 py-2 rounded-xl text-sm font-semibold text-white h-10 disabled:opacity-50"
               style={{ background: '#FF5C1A' }}
             >
-              Save Account
+              {isSaving ? 'Saving…' : 'Save Account'}
             </button>
           </div>
         </>
@@ -353,10 +391,10 @@ function Field({ label, value, onChange, type = 'text', placeholder, maxLength }
 export default function Accounts() {
   const { data: accounts = [], isLoading } = useAccounts()
   const { data: desks = [] } = useDesks()
-  // const { data: desks = [] } = useDesks()
   const createAcc = useCreateAccount()
   const updateAcc = useUpdateAccount()
   const deleteAcc = useDeleteAccount()
+  const qc = useQueryClient()
 
   const [modal, setModal] = useState(null) // null | { mode: 'create'|'edit', account?: obj }
 
@@ -364,11 +402,22 @@ export default function Accounts() {
     try {
       if (modal?.mode === 'edit') {
         await updateAcc.mutateAsync({ id: modal.account.id, data: form })
+        setModal(null)
       } else {
-        await createAcc.mutateAsync(form)
+        // Create returns the new account — re-open modal in edit mode so user can login
+        const newAccount = await createAcc.mutateAsync(form)
+        if (newAccount?.id) {
+          toast.success('Account saved — now connect your X login')
+          setModal({ mode: 'edit', account: newAccount })
+        } else {
+          setModal(null)
+        }
       }
-      setModal(null)
     } catch { /* hook shows toast */ }
+  }
+
+  function handleLoginSuccess() {
+    qc.invalidateQueries({ queryKey: ['accounts'] })
   }
 
   async function handleDelete(account) {
@@ -429,8 +478,10 @@ export default function Accounts() {
         <AccountForm
           initial={modal?.account}
           desks={desks}
+          isSaving={createAcc.isPending || updateAcc.isPending}
           onSave={handleSave}
           onCancel={() => setModal(null)}
+          onLoginSuccess={handleLoginSuccess}
         />
       </Modal>
     </div>

@@ -443,6 +443,71 @@ async def list_sessions() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/login/export-cookies/{account_id}
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/export-cookies/{account_id}",
+    summary="Export decrypted cookies for VPS migration",
+    status_code=status.HTTP_200_OK,
+)
+async def export_cookies(
+    account_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Export the raw cookies for a logged-in account.
+    This allows logging in locally and transferring the session to a headless VPS.
+    """
+    await _get_account_or_404(db, account_id)
+    cookies = await login_manager.get_cookies_for_account(account_id, db)
+    if not cookies:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No valid cookies found for this account. Login first.",
+        )
+    return {"account_id": account_id, "cookies": cookies}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/login/import-cookies
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/import-cookies",
+    summary="Import raw cookies from another environment",
+    status_code=status.HTTP_200_OK,
+)
+async def import_cookies(
+    account_id: int = Body(...),
+    cookies: list[dict] = Body(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Receive raw cookies (exported from a local instance), encrypt them,
+    and persist them to the database.
+    """
+    await _get_account_or_404(db, account_id)
+    try:
+        result = await login_manager.import_cookies(account_id, cookies, db)
+        return result
+    except LoginManagerError as exc:
+        logger.error("import_cookies error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to import cookies: {exc}"
+        )
+    except Exception:
+        logger.error("import_cookies: unexpected error:\n%s", traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unexpected error importing cookies."
+        )
+
+
+# ---------------------------------------------------------------------------
 # POST /api/login/test-cookies/{account_id}
 # ---------------------------------------------------------------------------
 

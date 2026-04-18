@@ -289,7 +289,7 @@ class TelegramNotifier:
             f"Desk: {esc(desk.name)}\n"
             f"Author: {esc(handle)}\n"
             f"Score: {esc(str(score))}/100\n"
-            f"Expires: ~4 hours\n\n"
+            f"Expires: \\~4 hours\n\n"
             f"_{esc(opportunity.tweet_text[:200])}_"
         )
         keyboard = [

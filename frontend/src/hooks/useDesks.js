@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getDesks, getDeskById, createDesk, updateDesk, deleteDesk, toggleDeskMode, getDeskTrends } from '../api/client'
+import { getDesks, getDeskById, createDesk, updateDesk, deleteDesk, toggleDeskMode, getDeskTrends, getDeskTrendsLive } from '../api/client'
 import toast from 'react-hot-toast'
 
 export function useDesks(params) {
@@ -80,5 +80,17 @@ export function useDeskTrends(deskId) {
     enabled: !!deskId,
     refetchInterval: 60000,
     staleTime: 30000,
+  })
+}
+
+export function useRefreshDeskTrends() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (deskId) => getDeskTrendsLive(deskId, true, 10),
+    onSuccess: (_, deskId) => {
+      qc.invalidateQueries({ queryKey: ['trends', deskId] })
+      qc.invalidateQueries({ queryKey: ['spikes'] })
+    },
+    onError: (err) => toast.error(err.message),
   })
 }

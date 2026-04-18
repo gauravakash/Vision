@@ -42,13 +42,30 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # ---------------------------------------------------------------------------
 
 X_SELECTORS = {
-    "compose_box":   '[data-testid="tweetTextarea_0"]',
-    "post_button":   '[data-testid="tweetButton"]',
-    "success_toast": '[data-testid="toast"]',
-    "reply_box":     '[data-testid="tweetTextarea_0"]',
-    "captcha":       '[data-testid="ocfChallengeEmailInput"]',
-    "warning":       '[data-testid="error-detail"]',
-    "suspended":     'text="Your account is suspended"',
+    "compose_box":   [
+        '[data-testid="tweetTextarea_0"]',
+        'div[aria-label="Tweet text"]',
+        '.public-DraftEditor-content'
+    ],
+    "post_button":   [
+        '[data-testid="tweetButton"]',
+        '[data-testid="tweetButtonInline"]',
+        'div[role="button"]:has-text("Post")'
+    ],
+    "success_toast": [
+        '[data-testid="toast"]',
+        'div[role="alert"]'
+    ],
+    "reply_box":     [
+        '[data-testid="tweetTextarea_0"]',
+        'div[aria-label="Tweet text"]'
+    ],
+    "captcha":       [
+        '[data-testid="ocfChallengeEmailInput"]', 
+        'input[name="text"]'
+    ],
+    "warning":       ['[data-testid="error-detail"]'],
+    "suspended":     ['text="Your account is suspended"'],
 }
 
 HUMAN_BEHAVIOR = {
@@ -84,8 +101,6 @@ class TweetPoster:
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
         self._posting_lock = asyncio.Lock()
-        # {account_id: [datetime, ...]}
-        self._post_history: dict[int, list[datetime]] = {}
 
     # ------------------------------------------------------------------
     # Rate limiting
@@ -94,15 +109,10 @@ class TweetPoster:
     async def can_post(
         self,
         account_id: int,
+        db: Any,
     ) -> tuple[bool, str]:
         """
         Check whether this account can post right now.
-
-        Checks:
-          1. Max posts per day (settings.MAX_POSTS_PER_ACCOUNT_DAY)
-          2. Minimum gap between posts (settings.MIN_GAP_BETWEEN_POSTS_MIN)
-          3. IST quiet hours 00:00–06:00
-
         Returns (True, "ok") or (False, reason).
         """
         now_ist = datetime.now(_IST)
@@ -111,8 +121,18 @@ class TweetPoster:
         if 0 <= now_ist.hour < 6:
             return False, f"Quiet hours ({now_ist.hour:02d}:00 IST)"
 
-        self._clean_post_history(account_id)
-        history = self._post_history.get(account_id, [])
+        from backend.models import PostLog  # noqa: PLC0415
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        result = await db.execute(
+            select(PostLog.posted_at)
+            .where(
+                PostLog.account_id == account_id,
+                PostLog.status == "success",
+                PostLog.posted_at > cutoff
+            )
+            .order_by(PostLog.posted_at.asc())
+        )
+        history = result.scalars().all()
 
         # Daily cap
         max_day = settings.MAX_POSTS_PER_ACCOUNT_DAY
@@ -244,6 +264,74 @@ class TweetPoster:
     # Playwright internals
     # ------------------------------------------------------------------
 
+    async def _click_any(self, page: Any, selectors: list[str], timeout: int = 10_000) -> str:
+        """Try multiple selectors until one works."""
+        end_time = time.time() + (timeout / 1000.0)
+        while time.time() < end_time:
+            for sel in selectors:
+                try:
+                    el = await page.wait_for_selector(sel, timeout=1000, state="attached")
+                    if el:
+                        await el.click(timeout=1000)
+                        return sel
+                except Exception:
+                    pass
+        raise Exception(f"Failed to click any of {selectors}")
+
+    async def _wait_for_any(self, page: Any, selectors: list[str], timeout: int = 10_000) -> Any:
+        end_time = time.time() + (timeout / 1000.0)
+        while time.time() < end_time:
+            for sel in selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el: return el
+                except Exception:
+                    pass
+            await asyncio.sleep(0.5)
+        raise Exception(f"Failed to wait for any of {selectors}")
+
+    async def validate_selectors(self, account_id: int, db: Any) -> dict[str, Any]:
+        """Validate if the current X_SELECTORS are visible on the compose page."""
+        from backend.login_manager import login_manager as _lm  # noqa: PLC0415
+        from playwright.async_api import async_playwright  # noqa: PLC0415
+        
+        cookies = await _lm.get_cookies_for_account(account_id, db)
+        if not cookies:
+            return {"healthy": False, "error": "No valid session"}
+            
+        results = {"compose_box": False, "post_button": False}
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    executable_path=_CHROME_PATH or None,
+                    args=_CHROME_ARGS
+                )
+                context = await browser.new_context(user_agent=_REALISTIC_UA)
+                await context.add_cookies(cookies)
+
+                page = await context.new_page()
+                await page.goto("https://x.com/compose/post", timeout=30_000)
+                await asyncio.sleep(4)
+
+                try:
+                    await self._wait_for_any(page, X_SELECTORS["compose_box"], timeout=5_000)
+                    results["compose_box"] = True
+                except Exception:
+                    pass
+                    
+                try:
+                    await self._wait_for_any(page, X_SELECTORS["post_button"], timeout=5_000)
+                    results["post_button"] = True
+                except Exception:
+                    pass
+
+                await browser.close()
+                return {"healthy": results["compose_box"] and results["post_button"], "details": results}
+        except Exception as exc:
+            return {"healthy": False, "error": str(exc)}
+
     async def _do_post(
         self,
         cookies: list[dict],
@@ -310,25 +398,23 @@ class TweetPoster:
                 await asyncio.sleep(random.uniform(lo, hi))
 
                 # Click compose / reply box
-                selector = X_SELECTORS["compose_box"]
-                await page.click(selector, timeout=10_000)
+                selector_list = X_SELECTORS["reply_box"] if reply_to_url else X_SELECTORS["compose_box"]
+                used_selector = await self._click_any(page, selector_list, timeout=10_000)
                 await asyncio.sleep(0.5)
 
                 # Human-like typing
-                await self._human_type(page, selector, text)
+                await self._human_type(page, used_selector, text)
 
                 # Pre-post delay
                 lo2, hi2 = HUMAN_BEHAVIOR["pre_post_delay"]
                 await asyncio.sleep(random.uniform(lo2, hi2))
 
                 # Click post button
-                await page.click(X_SELECTORS["post_button"], timeout=10_000)
+                await self._click_any(page, X_SELECTORS["post_button"], timeout=10_000)
 
                 # Wait for success signal
                 try:
-                    await page.wait_for_selector(
-                        X_SELECTORS["success_toast"], timeout=15_000
-                    )
+                    await self._wait_for_any(page, X_SELECTORS["success_toast"], timeout=15_000)
                 except Exception:
                     pass  # URL-change detection below
 
@@ -378,24 +464,26 @@ class TweetPoster:
         """Return {'healthy': bool, 'issue': str|None}."""
         try:
             # Captcha
-            captcha = await page.query_selector(X_SELECTORS["captcha"])
-            if captcha:
-                return {"healthy": False, "issue": "captcha"}
+            for sel in X_SELECTORS["captcha"]:
+                if await page.query_selector(sel):
+                    return {"healthy": False, "issue": "captcha"}
 
             # Suspension
             content = await page.content()
-            if "Your account is suspended" in content:
-                return {"healthy": False, "issue": "suspended"}
+            for susp in X_SELECTORS["suspended"]:
+                if susp.replace('text="', '').replace('"', '') in content:
+                    return {"healthy": False, "issue": "suspended"}
 
             # Unusual activity / locked
             if "unusual activity" in content.lower() or "account is locked" in content.lower():
                 return {"healthy": False, "issue": "locked"}
 
             # Warning/error
-            warning_el = await page.query_selector(X_SELECTORS["warning"])
-            if warning_el:
-                warning_text = await warning_el.text_content() or ""
-                return {"healthy": False, "issue": f"warned: {warning_text[:80]}"}
+            for sel in X_SELECTORS["warning"]:
+                warning_el = await page.query_selector(sel)
+                if warning_el:
+                    warning_text = await warning_el.text_content() or ""
+                    return {"healthy": False, "issue": f"warned: {warning_text[:80]}"}
 
         except Exception:
             pass
@@ -411,13 +499,14 @@ class TweetPoster:
                 return current_url
 
             # Look for a link in the success toast
-            toast_el = await page.query_selector(X_SELECTORS["success_toast"])
-            if toast_el:
-                links = await toast_el.query_selector_all("a[href*='/status/']")
-                if links:
-                    href = await links[0].get_attribute("href")
-                    if href:
-                        return f"https://x.com{href}" if href.startswith("/") else href
+            for sel in X_SELECTORS["success_toast"]:
+                toast_el = await page.query_selector(sel)
+                if toast_el:
+                    links = await toast_el.query_selector_all("a[href*='/status/']")
+                    if links:
+                        href = await links[0].get_attribute("href")
+                        if href:
+                            return f"https://x.com{href}" if href.startswith("/") else href
         except Exception:
             pass
 
@@ -427,26 +516,20 @@ class TweetPoster:
     # History tracking
     # ------------------------------------------------------------------
 
-    def _record_post(self, account_id: int) -> None:
-        """Record this post and clean up entries older than 24h."""
-        self._clean_post_history(account_id)
-        if account_id not in self._post_history:
-            self._post_history[account_id] = []
-        self._post_history[account_id].append(datetime.utcnow())
-
-    def _clean_post_history(self, account_id: int) -> None:
-        """Remove entries older than 24 hours from in-memory history."""
+    async def get_post_stats(self, account_id: int, db: Any) -> dict[str, Any]:
+        """Return posting stats for an account from the database."""
+        from backend.models import PostLog  # noqa: PLC0415
         cutoff = datetime.utcnow() - timedelta(hours=24)
-        if account_id in self._post_history:
-            self._post_history[account_id] = [
-                dt for dt in self._post_history[account_id]
-                if dt > cutoff
-            ]
-
-    def get_post_stats(self, account_id: int) -> dict[str, Any]:
-        """Return posting stats for an account."""
-        self._clean_post_history(account_id)
-        history = self._post_history.get(account_id, [])
+        result = await db.execute(
+            select(PostLog.posted_at)
+            .where(
+                PostLog.account_id == account_id,
+                PostLog.status == "success",
+                PostLog.posted_at > cutoff
+            )
+            .order_by(PostLog.posted_at.asc())
+        )
+        history = result.scalars().all()
 
         last_post: Optional[datetime] = history[-1] if history else None
         minutes_since: Optional[int] = None

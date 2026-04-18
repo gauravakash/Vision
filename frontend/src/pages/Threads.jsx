@@ -209,13 +209,13 @@ export default function Threads() {
     if (accounts.length > 0 && selectedAccounts.length === 0) {
       setSelectedAccounts([accounts[0].id])
     }
-  }, [accounts])
+  }, [accounts, selectedAccounts.length])
 
   useEffect(() => {
     if (desks.length > 0 && !selectedDesk) {
       setSelectedDesk(desks[0].id)
     }
-  }, [desks])
+  }, [desks, selectedDesk])
 
   function toggleAccount(id) {
     setSelectedAccounts((prev) =>

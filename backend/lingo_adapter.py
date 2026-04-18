@@ -370,7 +370,17 @@ At {intensity}% intensity:
         if not full_text.strip():
             return None
 
-        # Try JSON object via regex
+        # 1. Try to extract JSON from a markdown block
+        md_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", full_text)
+        if md_match:
+            try:
+                data = json.loads(md_match.group(1))
+                if isinstance(data, dict):
+                    return self._dict_to_profile(data, handle)
+            except json.JSONDecodeError:
+                pass
+
+        # 2. Try JSON object via regex fallback
         match = re.search(r"\{[\s\S]*\}", full_text)
         if match:
             try:
@@ -380,7 +390,7 @@ At {intensity}% intensity:
             except json.JSONDecodeError:
                 pass
 
-        # Fallback: whole response
+        # 3. Fallback: whole response
         try:
             data = json.loads(full_text.strip())
             if isinstance(data, dict):

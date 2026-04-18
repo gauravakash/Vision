@@ -415,7 +415,10 @@ class LoginManager:
         try:
             _launch_kwargs: dict = {
                 "headless": False,
-                "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+                "args": [
+                    "--disable-blink-features=AutomationControlled"
+                ],
+                "ignore_default_args": ["--enable-automation"],
             }
             if _chrome_exe:
                 _launch_kwargs["executable_path"] = _chrome_exe
@@ -427,7 +430,14 @@ class LoginManager:
                 user_agent=_X_USER_AGENT,
                 locale="en-US",
             )
+            
             page = await context.new_page()
+            try:
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
+            except ImportError:
+                self.logger.warning("playwright-stealth not installed, using basic config.")
+            
             await page.goto("https://x.com/login", timeout=30_000)
             await page.wait_for_load_state("domcontentloaded", timeout=30_000)
 
@@ -674,6 +684,58 @@ class LoginManager:
             "expires_at": expiry_dt.isoformat(),
             "days_valid": days_valid,
         }
+
+    async def import_cookies(
+        self,
+        account_id: int,
+        raw_cookies: list[dict],
+        db: AsyncSession,
+    ) -> dict[str, Any]:
+        """
+        Import and encrypt raw cookies (used for VPS local-to-remote transfer).
+        """
+        try:
+            encrypted = self._encryption.encrypt(raw_cookies)
+            expiry_dt = datetime.utcnow() + timedelta(days=settings.COOKIE_EXPIRY_DAYS)
+
+            account_result = await db.execute(
+                select(Account).where(
+                    Account.id == account_id,
+                    Account.is_deleted.is_(False),
+                )
+            )
+            account = account_result.scalar_one_or_none()
+            if account is None:
+                raise LoginManagerError(f"Account id={account_id} not found in DB.")
+
+            account.cookies_encrypted = encrypted
+            account.cookie_expiry = expiry_dt
+            account.is_connected = True
+            account.last_login_at = datetime.utcnow()
+            account.updated_at = datetime.utcnow()
+
+            log_entry = ActivityLog(
+                event_type="login_success",
+                message=(
+                    f"Account {account.handle} imported cookies successfully. "
+                    f"{len(raw_cookies)} cookies stored, "
+                    f"expires {expiry_dt.strftime('%Y-%m-%d')}."
+                ),
+                color="#2ECC71",
+                account_id=account_id,
+            )
+            db.add(log_entry)
+            await db.commit()
+
+            return {
+                "success": True,
+                "handle": account.handle,
+                "cookie_count": len(raw_cookies),
+                "expires_at": expiry_dt.isoformat(),
+                "days_valid": settings.COOKIE_EXPIRY_DAYS,
+            }
+        except Exception as exc:
+            raise LoginManagerError(f"Failed to import cookies: {exc}") from exc
 
     async def close_session(self, session_id: str) -> bool:
         """

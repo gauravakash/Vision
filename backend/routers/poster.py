@@ -69,6 +69,7 @@ class PostLogOut(BaseModel):
 @router.get("/can-post/{account_id}", response_model=CanPostResponse)
 async def can_post_check(
     account_id: int,
+    db: AsyncSession = Depends(get_db)
 ) -> CanPostResponse:
     """
     Check whether an account is currently allowed to post.
@@ -77,8 +78,18 @@ async def can_post_check(
     """
     from backend.poster import tweet_poster  # noqa: PLC0415
 
-    ok, reason = await tweet_poster.can_post(account_id)
+    ok, reason = await tweet_poster.can_post(account_id, db)
     return CanPostResponse(can_post=ok, reason=reason, account_id=account_id)
+
+
+@router.get("/validate-selectors/{account_id}")
+async def validate_selectors(
+    account_id: int,
+    db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    """Test if current Playwright selectors are intact on X.com."""
+    from backend.poster import tweet_poster  # noqa: PLC0415
+    return await tweet_poster.validate_selectors(account_id, db)
 
 
 @router.post("/post-draft/{draft_id}", response_model=PostDraftResponse)
@@ -112,13 +123,24 @@ async def post_draft(
         db=db,
     )
 
+    post_log = PostLog(
+        account_id=draft.account_id,
+        draft_id=draft.id,
+        post_type="tweet",
+        text_posted=draft.final_text,
+        status="success" if post_result["success"] else (post_result.get("error_type") or "failed"),
+        error_message=post_result.get("error"),
+        tweet_url=post_result.get("tweet_url"),
+    )
+    db.add(post_log)
+
     if post_result["success"]:
         draft.status = "posted"
         draft.posted_at = datetime.utcnow()
-        await db.commit()
     else:
         draft.status = "failed"
-        await db.commit()
+        
+    await db.commit()
 
     return PostDraftResponse(
         success=post_result["success"],
@@ -173,6 +195,17 @@ async def post_reply_draft(
         reply_to_url=reply_to_url,
     )
 
+    post_log = PostLog(
+        account_id=draft.account_id,
+        reply_draft_id=draft.id,
+        post_type="reply",
+        text_posted=draft.final_text,
+        status="success" if post_result["success"] else (post_result.get("error_type") or "failed"),
+        error_message=post_result.get("error"),
+        tweet_url=post_result.get("tweet_url"),
+    )
+    db.add(post_log)
+
     if post_result["success"]:
         draft.status = "posted"
         draft.posted_at = datetime.utcnow()
@@ -198,12 +231,13 @@ async def post_reply_draft(
 @router.get("/account-stats/{account_id}", response_model=dict)
 async def get_account_stats(
     account_id: int,
+    db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
-    """Return in-memory 24h posting statistics for an account."""
+    """Return database 24h posting statistics for an account."""
     from backend.poster import tweet_poster  # noqa: PLC0415
 
-    stats = tweet_poster.get_post_stats(account_id)
-    ok, reason = await tweet_poster.can_post(account_id)
+    stats = await tweet_poster.get_post_stats(account_id, db)
+    ok, reason = await tweet_poster.can_post(account_id, db)
     return {
         **stats,
         "can_post": ok,

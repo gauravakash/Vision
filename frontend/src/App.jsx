@@ -9,6 +9,8 @@ import Settings from './pages/Settings'
 import Engagement from './pages/Engagement'
 import Threads from './pages/Threads'
 
+import NotFound from './pages/NotFound'
+
 const router = createBrowserRouter([
   {
     path: '/',
@@ -22,6 +24,7 @@ const router = createBrowserRouter([
       { path: 'settings',      element: <Settings /> },
       { path: 'engagement',    element: <Engagement /> },
       { path: 'threads',       element: <Threads /> },
+      { path: '*',             element: <NotFound /> },
     ],
   },
 ])

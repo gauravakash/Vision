@@ -1,7 +1,7 @@
 import { memo, useCallback } from 'react'
-import { Play, Zap, MoreHorizontal } from 'lucide-react'
+import { Play, Zap, MoreHorizontal, RefreshCw } from 'lucide-react'
 import { LineChart, Line, ResponsiveContainer, Tooltip } from 'recharts'
-import { useDeskTrends, useToggleDeskMode } from '../../hooks/useDesks'
+import { useDeskTrends, useToggleDeskMode, useRefreshDeskTrends } from '../../hooks/useDesks'
 import { useRunDesk } from '../../hooks/useAgent'
 import { timeAgo, formatVolume, spikeColor } from '../../utils/formatters'
 
@@ -29,6 +29,7 @@ function ModeChip({ mode, deskId }) {
 const DeskCard = memo(function DeskCard({ desk, isSpiking = false, onEdit }) {
   const { data: trends = [] } = useDeskTrends(desk.id)
   const runDesk = useRunDesk()
+  const refreshTrends = useRefreshDeskTrends()
 
   // Build sparkline data from trends
   const sparkData = trends.slice(0, 12).reverse().map((t, i) => ({
@@ -44,6 +45,11 @@ const DeskCard = memo(function DeskCard({ desk, isSpiking = false, onEdit }) {
     e.stopPropagation()
     runDesk.mutate({ deskId: desk.id, data: {} })
   }, [desk.id, runDesk])
+
+  const handleRefresh = useCallback((e) => {
+    e.stopPropagation()
+    refreshTrends.mutate(desk.id)
+  }, [desk.id, refreshTrends])
 
   return (
     <div
@@ -139,19 +145,29 @@ const DeskCard = memo(function DeskCard({ desk, isSpiking = false, onEdit }) {
         <span className="text-xs text-text-muted">
           {trends[0] ? timeAgo(trends[0].snapshot_time) : 'No data'}
         </span>
-        <button
-          onClick={handleRun}
-          disabled={runDesk.isPending}
-          className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-colors"
-          style={
-            isSpiking
-              ? { background: 'rgba(192,57,43,0.1)', color: '#C0392B', border: '1px solid rgba(192,57,43,0.2)' }
-              : { background: 'rgba(255,92,26,0.1)', color: '#FF5C1A', border: '1px solid rgba(255,92,26,0.2)' }
-          }
-        >
-          {isSpiking ? <Zap size={12} /> : <Play size={11} />}
-          {isSpiking ? 'Draft Now' : 'Run'}
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleRefresh}
+            disabled={refreshTrends.isPending}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors text-text-muted hover:text-text-primary hover:bg-cream"
+            title="Fetch fresh trends"
+          >
+            <RefreshCw size={11} className={refreshTrends.isPending ? 'animate-spin' : ''} />
+          </button>
+          <button
+            onClick={handleRun}
+            disabled={runDesk.isPending}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-colors"
+            style={
+              isSpiking
+                ? { background: 'rgba(192,57,43,0.1)', color: '#C0392B', border: '1px solid rgba(192,57,43,0.2)' }
+                : { background: 'rgba(255,92,26,0.1)', color: '#FF5C1A', border: '1px solid rgba(255,92,26,0.2)' }
+            }
+          >
+            {isSpiking ? <Zap size={12} /> : <Play size={11} />}
+            {isSpiking ? 'Draft Now' : 'Run'}
+          </button>
+        </div>
       </div>
     </div>
   )
