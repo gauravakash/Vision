@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from backend.config import settings
+from backend.intent_url import IntentURL
 from backend.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -294,7 +295,7 @@ class TelegramNotifier:
         )
         keyboard = [
             [
-                {"text": "Post Reply",  "callback_data": f"rpost:{opportunity.id}"},
+                {"text": "Open in X",   "callback_data": f"rpost:{opportunity.id}"},
                 {"text": "Skip",        "callback_data": f"rskip:{opportunity.id}"},
             ],
             [
@@ -336,7 +337,7 @@ class TelegramNotifier:
 
         keyboard = [
             [
-                {"text": "Approve & Post", "callback_data": f"rpost:{opportunity.id}"},
+                {"text": "Open in X",      "callback_data": f"rpost:{opportunity.id}"},
                 {"text": "Regenerate",     "callback_data": f"rregen:{opportunity.id}"},
                 {"text": "Skip All",       "callback_data": f"rskipall:{opportunity.id}"},
             ]
@@ -466,7 +467,7 @@ class TelegramNotifier:
 
             elif action == "rpost" and len(parts) >= 2:
                 opp_id = int(parts[1])
-                from backend.models import ReplyDraft  # noqa: PLC0415
+                from backend.models import Account, ReplyDraft, ReplyOpportunity  # noqa: PLC0415
                 from sqlalchemy import select  # noqa: PLC0415
 
                 result = await db.execute(
@@ -479,32 +480,46 @@ class TelegramNotifier:
                 if not drafts:
                     return "No pending reply drafts for this opportunity"
 
-                from backend.poster import tweet_poster as _poster  # noqa: PLC0415
-                posted = 0
+                opp_result = await db.execute(
+                    select(ReplyOpportunity).where(ReplyOpportunity.id == opp_id)
+                )
+                opp = opp_result.scalar_one_or_none()
+                reply_to_url = opp.tweet_url if opp is not None else None
+
+                links_sent = 0
+                now = datetime.utcnow()
                 for draft in drafts:
-                    from backend.models import ReplyOpportunity  # noqa: PLC0415
-                    opp_result = await db.execute(
-                        select(ReplyOpportunity).where(ReplyOpportunity.id == opp_id)
-                    )
-                    opp = opp_result.scalar_one_or_none()
-                    if opp is None:
-                        continue
-                    res = await _poster.post_tweet(
-                        account_id=draft.account_id,
+                    intent_url = IntentURL.reply(
                         text=draft.final_text,
-                        db=db,
-                        reply_to_url=opp.tweet_url,
+                        reply_to_url=reply_to_url,
                     )
-                    if res["success"]:
-                        draft.status = "posted"
-                        draft.posted_at = datetime.utcnow()
-                        draft.tweet_url_after_post = res.get("tweet_url")
-                        posted += 1
+
+                    account_result = await db.execute(
+                        select(Account).where(Account.id == draft.account_id)
+                    )
+                    account = account_result.scalar_one_or_none()
+                    account_handle = f"@{account.handle}" if account and account.handle else "Unknown account"
+
+                    draft.status = "approved"
+                    draft.updated_at = now
+
+                    if self._bot is not None:
+                        await self._bot.send_message(
+                            chat_id=settings.TELEGRAM_CHAT_ID,
+                            parse_mode="HTML",
+                            text=(
+                                f"<b>Reply ready for {account_handle}</b>\n\n"
+                                f"<a href=\"{intent_url}\">Open in X</a>\n\n"
+                                f"<i>{draft.final_text[:220]}</i>"
+                            ),
+                        )
                     else:
-                        draft.status = "failed"
-                        draft.post_error = res.get("error")
+                        await self._send(
+                            f"Reply ready for {account_handle}\n{intent_url}"
+                        )
+                    links_sent += 1
                 await db.commit()
-                return f"Posted {posted}/{len(drafts)} reply draft(s)"
+                return f"Prepared {links_sent}/{len(drafts)} reply link(s)"
 
             elif action == "rregen" and len(parts) >= 2:
                 opp_id = int(parts[1])

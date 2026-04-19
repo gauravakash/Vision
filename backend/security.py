@@ -94,7 +94,7 @@ class InputSanitizer:
 # ---------------------------------------------------------------------------
 
 SENSITIVE_PATTERNS = [
-    (re.compile(r"sk-ant-[a-zA-Z0-9\-_]+"), "[REDACTED_ANTHROPIC_KEY]"),
+    (re.compile(r"xai-[a-zA-Z0-9\-_]+"), "[REDACTED_XAI_KEY]"),
     (re.compile(r"[0-9]{10}:[A-Za-z0-9\-_]{35}"), "[REDACTED_TELEGRAM_TOKEN]"),
     (re.compile(r"cookies?\s*[:=]\s*\S+", re.IGNORECASE), "[REDACTED_COOKIE]"),
     (re.compile(r"password\s*[:=]\s*\S+", re.IGNORECASE), "[REDACTED_PASSWORD]"),
@@ -128,29 +128,20 @@ def is_safe_for_log(data: dict | str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def validate_anthropic_key(key: str) -> bool:
-    """Test Anthropic API key with a minimal API call. Returns True if valid."""
+async def validate_xai_key(key: str) -> bool:
+    """Test xAI API key with a minimal API call. Returns True if valid."""
     try:
-        import anthropic  # noqa: PLC0415
-        client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        import xai  # noqa: PLC0415
+        client = xai.Client(api_key=key)
+        await client.chat.completions.create(
+            model="grok-beta",
             max_tokens=10,
             messages=[{"role": "user", "content": "Reply with just 'ok'"}],
         )
         return True
-    except anthropic.AuthenticationError:
-        return False
-    except Exception:
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "unauthorized" in msg or "401" in msg or "invalid api key" in msg:
+            return False
         # Network errors, etc. — treat as key might be valid
         return True
-
-
-def validate_cookie_encrypt_key(key: str) -> bool:
-    """Validate that key is a valid Fernet key (base64-encoded 32-byte key)."""
-    try:
-        from cryptography.fernet import Fernet  # noqa: PLC0415
-        Fernet(key.encode() if isinstance(key, str) else key)
-        return True
-    except Exception:
-        return False

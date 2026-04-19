@@ -128,7 +128,7 @@ export default function Settings() {
               </div>
             </Row>
             <CheckRow label="Database" check={health.checks?.database} />
-            <CheckRow label="Anthropic API" check={health.checks?.anthropic} />
+            <CheckRow label="xAI API" check={health.checks?.anthropic} />
             <CheckRow label="Telegram" check={health.checks?.telegram} />
             <CheckRow label="Playwright" check={health.checks?.playwright} />
             <CheckRow label="Scheduler" check={health.checks?.scheduler} />

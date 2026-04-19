@@ -93,7 +93,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     Groups:
       agent_run   — POST /api/agent/run-*  → 10 req / hour
-      poster      — POST /api/poster/post* → 50 req / hour
       default     — everything else        → 200 req / minute
     """
 
@@ -101,11 +100,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         "agent_run": {
             "path_prefixes": ["/api/agent/run", "/api/threads/run"],
             "max": None,  # filled from settings at first access
-            "window_seconds": 3600,
-        },
-        "poster": {
-            "path_prefixes": ["/api/poster/post"],
-            "max": None,
             "window_seconds": 3600,
         },
         "default": {
@@ -125,7 +119,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _init_limits(self) -> None:
         self.LIMITS["agent_run"]["max"] = settings.RATE_LIMIT_AGENT_RUN_PER_HOUR
-        self.LIMITS["poster"]["max"] = settings.RATE_LIMIT_POSTER_PER_HOUR
         self.LIMITS["default"]["max"] = settings.RATE_LIMIT_DEFAULT_PER_MINUTE
         self._limits_initialised = True
 

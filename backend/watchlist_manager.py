@@ -1,6 +1,6 @@
 """
 Watchlist manager — manages watched X accounts per desk
-and fetches their recent tweets using Claude web_search.
+and fetches their recent tweets using Grok web search.
 
 Safety:
   - Max 5 accounts per monitoring cycle (rotates which ones)
@@ -98,7 +98,7 @@ DEFAULT_WATCHLISTS: dict[str, list[dict[str, Any]]] = {
 
 
 class WatchlistManager:
-    """Manages watchlist accounts and fetches their recent tweets via Claude."""
+    """Manages watchlist accounts and fetches their recent tweets via Grok."""
 
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
@@ -187,7 +187,7 @@ class WatchlistManager:
         db: "AsyncSession",
     ) -> list[dict[str, Any]]:
         """
-        Fetch recent tweets from a watchlisted account using Claude web_search.
+        Fetch recent tweets from a watchlisted account using Grok web search.
 
         Filters out:
           - Already seen tweet IDs (in-memory cache)
@@ -196,32 +196,30 @@ class WatchlistManager:
           - Tweets older than 90 minutes
         """
         try:
-            from anthropic import AsyncAnthropic  # noqa: PLC0415
+            from backend.agent import xai_client  # noqa: PLC0415
 
-            client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
             handle = watchlist_account.x_handle.lstrip("@")
-            thirty_ago = (datetime.utcnow() - timedelta(minutes=30)).strftime("%Y-%m-%d")
 
-            response = await client.messages.create(
-                model="claude-opus-4-5",
+            response = await xai_client.chat.completions.create(
+                model=settings.XAI_MODEL,
                 max_tokens=2000,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Search for recent tweets from @{handle} posted in the last 30 minutes. "
-                        f"For each tweet, return a JSON array with objects containing: "
-                        f"id (numeric string from URL), text, likes (int), replies (int), "
-                        f"retweets (int), bookmarks (int), age_minutes (int), "
-                        f"url, has_question (bool), has_media (bool). "
-                        f"Return only the JSON array, no other text."
-                    ),
-                }],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Search for recent tweets from @{handle} posted in the last 30 minutes. "
+                            f"For each tweet, return a JSON array with objects containing: "
+                            f"id (numeric string from URL), text, likes (int), replies (int), "
+                            f"retweets (int), bookmarks (int), age_minutes (int), "
+                            f"url, has_question (bool), has_media (bool). "
+                            f"Return only the JSON array, no other text."
+                        ),
+                    }
+                ],
+                extra_body={"search_parameters": {"mode": "auto"}},
             )
 
-            text_content = "".join(
-                block.text for block in response.content if hasattr(block, "text")
-            )
+            text_content = (response.choices[0].message.content or "").strip()
 
             if settings.DEBUG:
                 self.logger.debug("fetch_recent_tweets raw response for @%s: %s", handle, text_content[:500])

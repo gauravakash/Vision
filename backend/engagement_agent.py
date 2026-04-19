@@ -498,11 +498,9 @@ class EngagementAgent:
         account: Account,
         desk: Desk,
     ) -> Optional[dict[str, Any]]:
-        """Call Claude to generate one anti-sycophantic reply draft."""
+        """Call Grok to generate one anti-sycophantic reply draft."""
         try:
-            from anthropic import AsyncAnthropic  # noqa: PLC0415
-
-            client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+            from backend.agent import xai_client  # noqa: PLC0415
 
             system_prompt = (
                 f"You are @{account.handle}, a {account.tone} voice on X (Twitter). "
@@ -522,14 +520,16 @@ class EngagementAgent:
                 f"Challenge, question, or add new information. No sycophancy."
             )
 
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL,
+            response = await xai_client.chat.completions.create(
+                model=settings.XAI_MODEL,
                 max_tokens=100,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
 
-            text = response.content[0].text.strip().strip('"').strip("'")
+            text = (response.choices[0].message.content or "").strip().strip('"').strip("'")
             if not text or len(text) > 280:
                 return None
 

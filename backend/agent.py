@@ -2,14 +2,14 @@
 AI Agent brain for X Agent platform.
 
 Sections:
-  1. Anthropic client (module-level singleton)
+  1. Grok client (module-level singleton)
   2. PromptBuilder — system/user prompt construction
-  3. TrendFetcher  — Claude + web_search to pull live trends
+  3. TrendFetcher  — Grok + web_search to pull live trends
   4. DraftGenerator — per-account draft generation with reach scoring
   5. Agent          — orchestrator: run_desk, run_all_desks, spike_response, regenerate
 
 Rate limiting is enforced in-memory per desk (MIN_SECONDS_BETWEEN_RUNS).
-All Anthropic errors are handled: RateLimitError retries once, others log + return None.
+Rate-limit and auth errors are detected from provider exceptions and handled safely.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, date
 from typing import Any, Optional
 
-import anthropic
+import xai
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,10 +42,20 @@ logger = get_logger(__name__)
 agent_logger = logging.getLogger("agent_activity")
 
 # ---------------------------------------------------------------------------
-# 1. Anthropic client
+# 1. xAI / Grok client
 # ---------------------------------------------------------------------------
 
-anthropic_client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+xai_client = xai.Client(api_key=settings.XAI_API_KEY)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "rate limit" in msg or "too many requests" in msg or "429" in msg
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "unauthorized" in msg or "authentication" in msg or "invalid api key" in msg or "401" in msg
 
 # ---------------------------------------------------------------------------
 # 2. PromptBuilder
@@ -187,7 +197,7 @@ Return ONLY the tweet text. No preamble, no explanation, no quotation marks arou
 
 class TrendFetcher:
     """
-    Uses Claude with the web_search tool to pull live trending topics for a desk.
+    Uses Grok with the web_search tool to pull live trending topics for a desk.
 
     Results are saved as TrendSnapshot rows and returned as dicts.
     """
@@ -205,36 +215,37 @@ class TrendFetcher:
 
         try:
             response = await self._call_with_search(search_prompt)
-        except anthropic.RateLimitError:
-            logger.warning("TrendFetcher: rate limit hit for desk %d, waiting 60s then retrying", desk.id)
-            await asyncio.sleep(60)
-            try:
-                response = await self._call_with_search(search_prompt)
-            except Exception as exc:
-                logger.error("TrendFetcher: retry also failed for desk %d: %s", desk.id, exc)
-                return []
-        except anthropic.APIConnectionError as exc:
-            logger.error("TrendFetcher: connection error for desk %d: %s", desk.id, exc)
-            return []
-        except anthropic.AuthenticationError as exc:
-            logger.critical("TrendFetcher: authentication error — check ANTHROPIC_API_KEY: %s", exc)
-            raise
         except Exception as exc:
-            logger.error("TrendFetcher: unexpected error for desk %d: %s", desk.id, exc)
-            return []
+            if _is_rate_limit_error(exc):
+                logger.warning("TrendFetcher: rate limit hit for desk %d, waiting 60s then retrying", desk.id)
+                await asyncio.sleep(60)
+                try:
+                    response = await self._call_with_search(search_prompt)
+                except Exception as retry_exc:
+                    logger.error("TrendFetcher: retry also failed for desk %d: %s", desk.id, retry_exc)
+                    return []
+            elif _is_auth_error(exc):
+                logger.critical("TrendFetcher: authentication error — check XAI_API_KEY: %s", exc)
+                raise
+            else:
+                logger.error("TrendFetcher: unexpected error for desk %d: %s", desk.id, exc)
+                return []
 
         # Record metrics
         try:
             from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
+            output_tokens = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0)
             await _metrics.record_api_call(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 error=False,
             )
         except Exception:
             pass
 
-        topics = self._parse_claude_response(response)
+        topics = self._parse_grok_response(response)
         validated = [self._validate_topic(t) for t in topics if t]
         validated = [t for t in validated if t is not None][:limit]
 
@@ -260,24 +271,21 @@ class TrendFetcher:
 
         return validated
 
-    async def _call_with_search(self, prompt: str) -> anthropic.types.Message:
+    async def _call_with_search(self, prompt: str) -> xai.types.Message:
         tools = [{"type": "web_search_20250305", "name": "web_search"}]
-        return await anthropic_client.messages.create(
-            model=settings.ANTHROPIC_MODEL,
+        return await xai_client.chat.completions.create(
+            model=settings.XAI_MODEL,
             max_tokens=2000,
             tools=tools,
             messages=[{"role": "user", "content": prompt}],
         )
 
-    def _parse_claude_response(self, response: anthropic.types.Message) -> list[dict]:
-        """Extract JSON array from Claude's response, tolerating prose wrappers."""
-        full_text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                full_text += block.text
+    def _parse_grok_response(self, response: xai.types.Message) -> list[dict]:
+        """Extract JSON array from Grok's response, tolerating prose wrappers."""
+        full_text = (response.choices[0].message.content or "").strip()
 
         if not full_text.strip():
-            logger.warning("TrendFetcher: Claude returned no text content")
+            logger.warning("TrendFetcher: Grok returned no text content")
             return []
 
         # Try to extract JSON array with regex first
@@ -336,7 +344,7 @@ class TrendFetcher:
 
 class DraftGenerator:
     """
-    Generates tweet drafts for accounts using Claude (no tools, plain text).
+    Generates tweet drafts for accounts using Grok (no tools, plain text).
 
     generate_single  — one draft for one account
     generate_for_desk_run — parallel generation across all eligible accounts
@@ -373,33 +381,34 @@ class DraftGenerator:
 
         try:
             response = await self._call_plain(system_prompt, user_message)
-        except anthropic.RateLimitError:
-            logger.warning(
-                "DraftGenerator: rate limit for account %s on topic %r, retrying in 60s",
-                account.handle, topic,
-            )
-            await asyncio.sleep(60)
-            try:
-                response = await self._call_plain(system_prompt, user_message)
-            except Exception as exc:
-                logger.error("DraftGenerator: retry failed for %s: %s", account.handle, exc)
-                return None
-        except anthropic.APIConnectionError as exc:
-            logger.error("DraftGenerator: connection error for %s: %s", account.handle, exc)
-            return None
-        except anthropic.AuthenticationError as exc:
-            logger.critical("DraftGenerator: authentication error — check ANTHROPIC_API_KEY: %s", exc)
-            raise
         except Exception as exc:
-            logger.error("DraftGenerator: unexpected error for %s: %s", account.handle, exc)
-            return None
+            if _is_rate_limit_error(exc):
+                logger.warning(
+                    "DraftGenerator: rate limit for account %s on topic %r, retrying in 60s",
+                    account.handle, topic,
+                )
+                await asyncio.sleep(60)
+                try:
+                    response = await self._call_plain(system_prompt, user_message)
+                except Exception as retry_exc:
+                    logger.error("DraftGenerator: retry failed for %s: %s", account.handle, retry_exc)
+                    return None
+            elif _is_auth_error(exc):
+                logger.critical("DraftGenerator: authentication error — check XAI_API_KEY: %s", exc)
+                raise
+            else:
+                logger.error("DraftGenerator: unexpected error for %s: %s", account.handle, exc)
+                return None
 
         # Record API metrics
         try:
             from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
+            output_tokens = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0)
             await _metrics.record_api_call(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 error=False,
             )
         except Exception:
@@ -529,20 +538,19 @@ class DraftGenerator:
 
         return drafts
 
-    async def _call_plain(self, system: str, user_message: str) -> anthropic.types.Message:
-        return await anthropic_client.messages.create(
-            model=settings.ANTHROPIC_MODEL,
-            max_tokens=settings.ANTHROPIC_MAX_TOKENS,
-            system=system,
-            messages=[{"role": "user", "content": user_message}],
+    async def _call_plain(self, system: str, user_message: str) -> xai.types.Message:
+        return await xai_client.chat.completions.create(
+            model=settings.XAI_MODEL,
+            max_tokens=settings.XAI_MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message}
+            ],
         )
 
-    def _extract_text(self, response: anthropic.types.Message) -> str:
-        """Pull text from the first text block in the response."""
-        for block in response.content:
-            if hasattr(block, "text") and block.text.strip():
-                return block.text.strip()
-        return ""
+    def _extract_text(self, response: xai.types.Message) -> str:
+        """Pull text from the response."""
+        return response.choices[0].message.content.strip()
 
     def calculate_reach_score(
         self,
@@ -646,9 +654,9 @@ class Agent:
         else:
             try:
                 topics = await self._trend_fetcher.fetch_for_desk(desk, db)
-            except anthropic.AuthenticationError:
-                return {"error": "Anthropic authentication failed", "drafts_created": 0}
             except Exception as exc:
+                if _is_auth_error(exc):
+                    return {"error": "Grok authentication failed", "drafts_created": 0}
                 logger.error("Agent.run_desk: trend fetch failed for desk %d: %s", desk_id, exc)
                 topics = []
 
@@ -671,9 +679,9 @@ class Agent:
                 content_type=content_type,
                 db=db,
             )
-        except anthropic.AuthenticationError:
-            return {"error": "Anthropic authentication failed", "drafts_created": 0}
         except Exception as exc:
+            if _is_auth_error(exc):
+                return {"error": "Grok authentication failed", "drafts_created": 0}
             logger.error("Agent.run_desk: draft generation failed for desk %d: %s", desk_id, exc)
             drafts = []
 

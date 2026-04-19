@@ -14,7 +14,6 @@ Endpoints available after startup:
     /api/drafts    → Draft management
     /api/agent     → AI agent control
     /api/scheduler → Scheduler control
-    /api/login     → Cookie-based auth
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -65,8 +63,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Startup order:
       1. Logging
       2. Database (create tables + seed)
-      3. LoginManager (Playwright)
-      4. Notifier (Telegram)
+      3. Notifier (Telegram alerts)
+      4. TelegramBot command center
       5. Scheduler jobs setup
       6. Scheduler start
       7. Startup summary log
@@ -74,7 +72,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Shutdown order:
       1. Scheduler stop
       2. Notifier shutdown
-      3. LoginManager shutdown
+      3. TelegramBot stop
       4. Database dispose
     """
 
@@ -85,28 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── 2. Database ───────────────────────────────────────────────────
     await init_db()
 
-    # ── 2b. Startup validation ────────────────────────────────────────
-    try:
-        from backend.security import validate_cookie_encrypt_key  # noqa: PLC0415
-        if not validate_cookie_encrypt_key(settings.COOKIE_ENCRYPT_KEY):
-            logger.critical(
-                "COOKIE_ENCRYPT_KEY is not a valid Fernet key — "
-                "cookie encryption will fail. Generate one with: "
-                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
-            )
-    except Exception as exc:
-        logger.warning("Startup key validation error (non-fatal): %s", exc)
-
-    # ── 3. LoginManager ───────────────────────────────────────────────
-    try:
-        from backend.login_manager import login_manager as _lm  # noqa: PLC0415
-
-        await _lm.initialize()
-        logger.info("LoginManager initialised")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("LoginManager init failed (non-fatal): %s", exc)
-
-    # ── 4. Notifier ───────────────────────────────────────────────────
+    # ── 3. Notifier ───────────────────────────────────────────────────
     _telegram_configured = False
     try:
         from backend.notifier import notifier as _notifier  # noqa: PLC0415
@@ -115,6 +92,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _telegram_configured = _notifier.is_configured
     except Exception as exc:  # noqa: BLE001
         logger.warning("Notifier init failed (non-fatal): %s", exc)
+
+    # ── 4. Telegram command bot ───────────────────────────────────────
+    try:
+        from backend.telegram_bot import telegram_bot  # noqa: PLC0415
+
+        await telegram_bot.start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TelegramBot start failed (non-fatal): %s", exc)
 
     # ── 5 + 6. Scheduler setup + start ────────────────────────────────
     try:
@@ -158,11 +143,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Notifier shutdown error (non-fatal): %s", exc)
 
     try:
-        from backend.login_manager import login_manager as _lm  # noqa: PLC0415
+        from backend.telegram_bot import telegram_bot  # noqa: PLC0415
 
-        await _lm.shutdown()
+        await telegram_bot.stop()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("LoginManager shutdown error (non-fatal): %s", exc)
+        logger.warning("TelegramBot stop error (non-fatal): %s", exc)
 
     await close_db()
     logger.info("X Agent stopped.")
@@ -177,7 +162,7 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=(
         "Production-grade X (Twitter) multi-account content management platform. "
-        "Powered by Claude AI for intelligent draft generation."
+        "Powered by Grok AI for intelligent draft generation."
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -189,17 +174,6 @@ app = FastAPI(
 # Middleware (order matters: added last = executed first)
 # ---------------------------------------------------------------------------
 
-# CORS must come before rate limiting so preflight requests pass through
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000",  # CRA / Next.js dev server
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(RequestIDMiddleware)
@@ -317,7 +291,7 @@ async def dev_dashboard() -> HTMLResponse:
 <body>
   <div class="header">
     <h1>&#x1F426; {settings.APP_NAME}</h1>
-    <p>Multi-account X content management — powered by Claude AI</p>
+    <p>Multi-account X content management — powered by Grok AI</p>
     <div class="badges">
       <span class="badge">v{settings.APP_VERSION}</span>
       <span class="badge">DEBUG: {settings.DEBUG}</span>
@@ -358,9 +332,7 @@ _ROUTER_CONFIGS = [
     ("backend.routers.drafts",     "/api/drafts",     ["drafts"]),
     ("backend.routers.agent",      "/api/agent",      ["agent"]),
     ("backend.routers.scheduler",  "/api/scheduler",  ["scheduler"]),
-    ("backend.routers.login",      "/api/login",      ["login"]),
     ("backend.routers.engagement", "/api/engagement", ["engagement"]),
-    ("backend.routers.poster",     "/api/poster",     ["poster"]),
     ("backend.routers.threads",    "/api/threads",    ["threads"]),
     ("backend.routers.lingo",      "/api/lingo",      ["lingo"]),
     ("backend.routers.admin",      "/api/admin",      ["admin"]),

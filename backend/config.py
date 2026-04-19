@@ -2,8 +2,7 @@
 Application configuration via pydantic-settings.
 
 All values are read from environment variables or a .env file.
-No sensitive defaults — ANTHROPIC_API_KEY, COOKIE_ENCRYPT_KEY,
-and SECRET_KEY are *required* at startup.
+No sensitive defaults — XAI_API_KEY and SECRET_KEY are *required* at startup.
 """
 
 from pydantic_settings import BaseSettings
@@ -18,44 +17,39 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------- Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./xagent.db"
 
-    # --------------------------------------------------------------- Anthropic
-    ANTHROPIC_API_KEY: str
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
-    ANTHROPIC_MAX_TOKENS: int = 1000
+    # --------------------------------------------------------------- xAI / Grok
+    XAI_API_KEY: str
+    XAI_MODEL: str = "grok-beta"
+    XAI_MAX_TOKENS: int = 1000
 
     # --------------------------------------------------------------- Telegram
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
 
     # --------------------------------------------------------------- Security
-    # COOKIE_ENCRYPT_KEY must be exactly 32 url-safe base64 characters.
-    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    COOKIE_ENCRYPT_KEY: str
     SECRET_KEY: str  # Reserved for future JWT auth
 
     # ------------------------------------------------------------- Scheduler
     SPIKE_CHECK_INTERVAL_MINUTES: int = 15
     SPIKE_THRESHOLD_PERCENT: float = 300.0
     DRAFT_AUTO_ABORT_MINUTES: int = 30
+    MORNING_BRIEFING_HOUR: int = 9
+    EVENING_SUMMARY_HOUR: int = 20
     COOKIE_EXPIRY_DAYS: int = 60
 
     # ---------------------------------------------------------- Rate limiting
     MAX_DRAFTS_PER_RUN: int = 10
     MIN_SECONDS_BETWEEN_RUNS: int = 300
 
-    # ---------------------------------------------------------- Engagement / Poster
-    MAX_POSTS_PER_ACCOUNT_DAY: int = 8
-    MIN_GAP_BETWEEN_POSTS_MIN: int = 45
+    # ---------------------------------------------------------- Engagement
     MAX_REPLY_OPPORTUNITIES_PER_CYCLE: int = 3
     ENGAGEMENT_AGENT_ENABLED: bool = True
-    AUTO_POSTER_ENABLED: bool = True
 
     # ---------------------------------------------------------- Production
     LOG_LEVEL: str = "INFO"
 
     # ---------------------------------------------------------- Rate limiting (HTTP API)
     RATE_LIMIT_AGENT_RUN_PER_HOUR: int = 10
-    RATE_LIMIT_POSTER_PER_HOUR: int = 50
     RATE_LIMIT_DEFAULT_PER_MINUTE: int = 200
 
     # ---------------------------------------------------------- Cost monitoring

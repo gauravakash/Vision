@@ -1,7 +1,7 @@
 """
 Thread Builder for X Agent platform.
 
-Builds multi-tweet threads (4-8 tweets) for accounts using a single Claude API call.
+Builds multi-tweet threads (4-8 tweets) for accounts using a single Grok API call.
 Each thread type has a defined narrative structure.
 
 Sections:
@@ -19,11 +19,11 @@ import re
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
-import anthropic
+import xai
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.agent import PromptBuilder, anthropic_client
+from backend.agent import PromptBuilder, xai_client
 from backend.config import settings
 from backend.database import AsyncSessionLocal
 from backend.logging_config import get_logger
@@ -115,7 +115,7 @@ _DESK_ROTATION = ["analysis", "hot_takes", "explainer", "story"]
 
 
 class ThreadBuilder:
-    """Builds multi-tweet threads using a single Claude API call per thread."""
+    """Builds multi-tweet threads using a single Grok API call per thread."""
 
     def __init__(self) -> None:
         self.logger = get_logger(__name__)
@@ -180,7 +180,7 @@ class ThreadBuilder:
         run_id = str(uuid.uuid4())
         parsed_tweets: list[dict] = []
 
-        # 7. Call Claude API
+        # 7. Call Grok API
         try:
             response = await self._call_plain(system_prompt, user_message, max_tokens=2500)
             if hasattr(response, "usage") and getattr(response.usage, "output_tokens", 0) > 2000:
@@ -190,21 +190,23 @@ class ThreadBuilder:
                 )
             raw_text = self._extract_text(response)
             parsed_tweets = self._parse_thread_response(raw_text, tweet_count)
-        except anthropic.RateLimitError:
-            self.logger.warning(
-                "ThreadBuilder: rate limit for account %s, retrying in 60s", account.handle
-            )
-            await asyncio.sleep(60)
-            try:
-                response = await self._call_plain(system_prompt, user_message, max_tokens=3000)
-                raw_text = self._extract_text(response)
-                parsed_tweets = self._parse_thread_response(raw_text, tweet_count)
-            except Exception as exc:
-                self.logger.error("ThreadBuilder: retry failed for %s: %s", account.handle, exc)
-                return {"success": False, "error": str(exc), "run_id": run_id}
         except Exception as exc:
-            self.logger.error("ThreadBuilder: API error for %s: %s", account.handle, exc)
-            return {"success": False, "error": str(exc), "run_id": run_id}
+            msg = str(exc).lower()
+            if "rate limit" in msg or "429" in msg:
+                self.logger.warning(
+                    "ThreadBuilder: rate limit for account %s, retrying in 60s", account.handle
+                )
+                await asyncio.sleep(60)
+                try:
+                    response = await self._call_plain(system_prompt, user_message, max_tokens=3000)
+                    raw_text = self._extract_text(response)
+                    parsed_tweets = self._parse_thread_response(raw_text, tweet_count)
+                except Exception as retry_exc:
+                    self.logger.error("ThreadBuilder: retry failed for %s: %s", account.handle, retry_exc)
+                    return {"success": False, "error": str(retry_exc), "run_id": run_id}
+            else:
+                self.logger.error("ThreadBuilder: API error for %s: %s", account.handle, exc)
+                return {"success": False, "error": str(exc), "run_id": run_id}
 
         # Retry once with stricter prompt if parse failed
         if not parsed_tweets:
@@ -226,7 +228,7 @@ class ThreadBuilder:
                 return {"success": False, "error": "Failed to parse thread response after retry", "run_id": run_id}
 
         if not parsed_tweets:
-            return {"success": False, "error": "Could not parse thread from Claude response", "run_id": run_id}
+            return {"success": False, "error": "Could not parse thread from Grok response", "run_id": run_id}
 
         # 9-10. Validate and save drafts atomically
         total = len(parsed_tweets)
@@ -559,19 +561,18 @@ THREAD STRUCTURE TO FOLLOW ({thread_type} — {thread_config["description"]}):
         system: str,
         user_message: str,
         max_tokens: int = 3000,
-    ) -> anthropic.types.Message:
-        return await anthropic_client.messages.create(
-            model=settings.ANTHROPIC_MODEL,
+    ) -> xai.types.Message:
+        return await xai_client.chat.completions.create(
+            model=settings.XAI_MODEL,
             max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user_message}],
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message}
+            ],
         )
 
-    def _extract_text(self, response: anthropic.types.Message) -> str:
-        for block in response.content:
-            if hasattr(block, "text") and block.text.strip():
-                return block.text.strip()
-        return ""
+    def _extract_text(self, response: xai.types.Message) -> str:
+        return response.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """
 Comprehensive health check system for X Agent platform.
 
-Checks: database, Anthropic API, Telegram, Playwright, Scheduler, Disk.
+Checks: database, Grok API, Telegram, Telegram bot runtime, Scheduler, Disk.
 All checks run concurrently via asyncio.gather.
 
 Module-level singleton: health_checker = HealthChecker()
@@ -10,7 +10,6 @@ Module-level singleton: health_checker = HealthChecker()
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -83,29 +82,28 @@ class HealthChecker:
                 "error": str(exc)[:200],
             }
 
-    async def check_anthropic(self) -> dict:
-        """Verify Anthropic API key with a minimal test call."""
+    async def check_xai(self) -> dict:
+        """Verify xAI / Grok API key with a minimal test call."""
         start = time.monotonic()
         try:
-            import anthropic  # noqa: PLC0415
-            from backend.agent import anthropic_client  # noqa: PLC0415
+            from backend.agent import xai_client  # noqa: PLC0415
 
-            resp = await anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            resp = await xai_client.chat.completions.create(
+                model="grok-beta",
                 max_tokens=10,
                 messages=[{"role": "user", "content": "Reply with just 'ok'"}],
             )
             return {
                 "status": "healthy",
                 "response_ms": int((time.monotonic() - start) * 1000),
-                "model": settings.ANTHROPIC_MODEL,
+                "model": settings.XAI_MODEL,
                 "error": None,
             }
         except Exception as exc:
             return {
                 "status": "unhealthy",
                 "response_ms": int((time.monotonic() - start) * 1000),
-                "model": settings.ANTHROPIC_MODEL,
+                "model": settings.XAI_MODEL,
                 "error": type(exc).__name__,
             }
 
@@ -136,39 +134,22 @@ class HealthChecker:
                 "error": str(exc)[:100],
             }
 
-    async def check_playwright(self) -> dict:
-        """Check Playwright/Chromium availability without launching a browser."""
+    async def check_telegram_bot(self) -> dict:
+        """Check whether the Telegram command bot runtime is active."""
         start = time.monotonic()
-        chromium_installed = False
-        active_sessions = 0
         try:
-            from playwright.async_api import async_playwright  # noqa: PLC0415
-            from backend.login_manager import login_manager as _lm  # noqa: PLC0415
+            from backend.telegram_bot import telegram_bot  # noqa: PLC0415
 
-            async with async_playwright() as pw:
-                chromium_installed = True
-
-            active_sessions = len(getattr(_lm, "_sessions", {}))
-
+            running = bool(getattr(telegram_bot, "_app", None))
             return {
-                "status": "healthy",
-                "chromium_installed": chromium_installed,
-                "active_sessions": active_sessions,
+                "status": "running" if running else "stopped",
+                "running": running,
                 "response_ms": int((time.monotonic() - start) * 1000),
-            }
-        except ImportError:
-            return {
-                "status": "unhealthy",
-                "chromium_installed": False,
-                "active_sessions": 0,
-                "response_ms": int((time.monotonic() - start) * 1000),
-                "error": "Playwright not installed",
             }
         except Exception as exc:
             return {
                 "status": "unhealthy",
-                "chromium_installed": chromium_installed,
-                "active_sessions": active_sessions,
+                "running": False,
                 "response_ms": int((time.monotonic() - start) * 1000),
                 "error": str(exc)[:100],
             }
@@ -246,15 +227,15 @@ class HealthChecker:
 
         checks_results = await asyncio.gather(
             self.check_database(db),
-            self.check_anthropic(),
+            self.check_xai(),
             self.check_telegram(),
-            self.check_playwright(),
+            self.check_telegram_bot(),
             self.check_scheduler(),
             self.check_disk_space(),
             return_exceptions=True,
         )
 
-        labels = ["database", "anthropic", "telegram", "playwright", "scheduler", "disk"]
+        labels = ["database", "grok", "telegram", "telegram_bot", "scheduler", "disk"]
         checks: dict[str, dict] = {}
         for label, result in zip(labels, checks_results):
             if isinstance(result, Exception):

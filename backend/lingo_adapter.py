@@ -22,9 +22,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Optional
 
-import anthropic
+import xai
 
-from backend.agent import anthropic_client
+from backend.agent import xai_client
 from backend.config import settings
 from backend.logging_config import get_logger
 
@@ -101,7 +101,7 @@ class LingoAdapter:
         db: Optional["AsyncSession"] = None,
     ) -> Optional[StyleProfile]:
         """
-        Analyze writing style of an X account via Claude with web_search.
+        Analyze writing style of an X account via Grok with web_search.
 
         Returns cached result if < 24 h old. Returns None on any failure (never raises).
         """
@@ -160,13 +160,14 @@ class LingoAdapter:
             self.logger.info("LingoAdapter: profile cached for @%s", handle)
             return profile
 
-        except anthropic.RateLimitError:
-            self.logger.warning("LingoAdapter: rate limit hit analyzing @%s", handle)
-            return None
-        except anthropic.AuthenticationError as exc:
-            self.logger.critical("LingoAdapter: authentication error: %s", exc)
-            raise
         except Exception as exc:
+            msg = str(exc).lower()
+            if "rate limit" in msg or "429" in msg:
+                self.logger.warning("LingoAdapter: rate limit hit analyzing @%s", handle)
+                return None
+            if "unauthorized" in msg or "authentication" in msg or "invalid api key" in msg or "401" in msg:
+                self.logger.critical("LingoAdapter: authentication error: %s", exc)
+                raise
             self.logger.warning("LingoAdapter: analyze failed for @%s: %s", handle, exc)
             return None
 
@@ -309,17 +310,15 @@ At {intensity}% intensity:
         adapted_prompt = self.build_adapted_prompt(base_prompt, profile, intensity)
 
         try:
-            response = await anthropic_client.messages.create(
-                model=settings.ANTHROPIC_MODEL,
+            response = await xai_client.chat.completions.create(
+                model=settings.XAI_MODEL,
                 max_tokens=400,
-                system=adapted_prompt,
-                messages=[{"role": "user", "content": f"Write a tweet about: {sample_topic}"}],
+                messages=[
+                    {"role": "system", "content": adapted_prompt},
+                    {"role": "user", "content": f"Write a tweet about: {sample_topic}"}
+                ],
             )
-            tweet_text = ""
-            for block in response.content:
-                if hasattr(block, "text") and block.text.strip():
-                    tweet_text = block.text.strip()
-                    break
+            tweet_text = response.choices[0].message.content.strip()
         except Exception as exc:
             self.logger.error("LingoAdapter: preview tweet generation failed: %s", exc)
             return {
@@ -358,14 +357,11 @@ At {intensity}% intensity:
 
     def _parse_style_profile(
         self,
-        response: anthropic.types.Message,
+        response: xai.types.Message,
         handle: str,
     ) -> Optional[StyleProfile]:
-        """Extract and parse the JSON style profile from Claude's response."""
-        full_text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                full_text += block.text
+        """Extract and parse the JSON style profile from Grok's response."""
+        full_text = (response.choices[0].message.content or "").strip()
 
         if not full_text.strip():
             return None
@@ -424,10 +420,10 @@ At {intensity}% intensity:
             style_summary=data.get("style_summary", ""),
         )
 
-    async def _call_with_search(self, prompt: str) -> anthropic.types.Message:
+    async def _call_with_search(self, prompt: str) -> xai.types.Message:
         tools = [{"type": "web_search_20250305", "name": "web_search"}]
-        return await anthropic_client.messages.create(
-            model=settings.ANTHROPIC_MODEL,
+        return await xai_client.chat.completions.create(
+            model=settings.XAI_MODEL,
             max_tokens=3000,
             tools=tools,
             messages=[{"role": "user", "content": prompt}],

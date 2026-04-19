@@ -27,7 +27,7 @@ from sqlalchemy import select, update
 from backend.config import settings
 from backend.database import AsyncSessionLocal
 from backend.logging_config import get_logger
-from backend.models import ActivityLog, Desk, Draft, ReplyOpportunity, SchedulerJob
+from backend.models import ActivityLog, Desk, Draft, SchedulerJob
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -178,17 +178,6 @@ async def job_spike_check() -> None:
             await db.close()
 
 
-async def job_cleanup_sessions() -> None:
-    """APScheduler job: clean up stale Playwright login sessions."""
-    try:
-        from backend.login_manager import login_manager as _lm  # noqa: PLC0415
-
-        await _lm.cleanup_stale_sessions()
-        logger.debug("job_cleanup_sessions: completed")
-    except Exception as exc:
-        logger.error("job_cleanup_sessions: error: %s", exc)
-
-
 async def job_cleanup_cooldowns() -> None:
     """APScheduler job: remove expired spike-alert cooldown entries."""
     try:
@@ -198,6 +187,28 @@ async def job_cleanup_cooldowns() -> None:
         logger.debug("job_cleanup_cooldowns: completed")
     except Exception as exc:
         logger.error("job_cleanup_cooldowns: error: %s", exc)
+
+
+async def job_morning_briefing() -> None:
+    """APScheduler job: send a daily morning briefing in Telegram."""
+    try:
+        from backend.telegram_bot import telegram_bot  # noqa: PLC0415
+
+        await telegram_bot.send_morning_briefing()
+        logger.info("job_morning_briefing: sent")
+    except Exception as exc:
+        logger.error("job_morning_briefing: error: %s", exc)
+
+
+async def job_evening_summary() -> None:
+    """APScheduler job: send a daily evening summary in Telegram."""
+    try:
+        from backend.telegram_bot import telegram_bot  # noqa: PLC0415
+
+        await telegram_bot.send_evening_summary()
+        logger.info("job_evening_summary: sent")
+    except Exception as exc:
+        logger.error("job_evening_summary: error: %s", exc)
 
 
 async def job_monitor_watchlists() -> None:
@@ -251,106 +262,6 @@ async def job_hourly_reply_batch() -> None:
     except Exception as exc:
         logger.error(
             "job_hourly_reply_batch: unhandled error: %s\n%s",
-            exc, traceback.format_exc(),
-        )
-    finally:
-        if db is not None:
-            await db.close()
-
-
-async def job_post_approved_drafts() -> None:
-    """
-    APScheduler job: auto-post approved reply drafts.
-
-    Runs every 10 minutes. Posts up to MAX_REPLY_OPPORTUNITIES_PER_CYCLE
-    approved reply drafts per run, respecting account rate limits.
-    """
-    if not settings.AUTO_POSTER_ENABLED:
-        return
-
-    db: Optional[AsyncSession] = None
-    try:
-        db = AsyncSessionLocal()
-        from backend.models import ReplyDraft, ReplyOpportunity  # noqa: PLC0415
-        from backend.poster import tweet_poster as _poster  # noqa: PLC0415
-
-        max_per_run = settings.MAX_REPLY_OPPORTUNITIES_PER_CYCLE
-        result = await db.execute(
-            select(ReplyDraft)
-            .where(
-                ReplyDraft.status == "approved",
-            )
-            .limit(max_per_run)
-        )
-        drafts: list[ReplyDraft] = result.scalars().all()
-
-        posted = 0
-        for draft in drafts:
-            try:
-                # Check rate limit
-                ok, reason = await _poster.can_post(draft.account_id)
-                if not ok:
-                    logger.debug(
-                        "job_post_approved_drafts: skip draft=%d reason=%s",
-                        draft.id, reason,
-                    )
-                    continue
-
-                # Get reply URL
-                opp_result = await db.execute(
-                    select(ReplyOpportunity).where(
-                        ReplyOpportunity.id == draft.opportunity_id
-                    )
-                )
-                opp = opp_result.scalar_one_or_none()
-                reply_to_url = opp.tweet_url if opp else None
-
-                post_result = await _poster.post_tweet(
-                    account_id=draft.account_id,
-                    text=draft.final_text,
-                    db=db,
-                    reply_to_url=reply_to_url,
-                )
-
-                if post_result["success"]:
-                    draft.status = "posted"
-                    draft.posted_at = datetime.utcnow()
-                    draft.tweet_url_after_post = post_result.get("tweet_url")
-                    if opp:
-                        opp.status = "acted"
-                    posted += 1
-                    logger.info(
-                        "job_post_approved_drafts: posted reply draft=%d account=%s",
-                        draft.id, post_result.get("account_handle", ""),
-                    )
-                else:
-                    draft.status = "failed"
-                    draft.post_error = post_result.get("error", "")[:200]
-                    logger.warning(
-                        "job_post_approved_drafts: draft=%d failed: %s",
-                        draft.id, post_result.get("error"),
-                    )
-
-                await db.commit()
-
-            except Exception as exc:
-                logger.error(
-                    "job_post_approved_drafts: draft=%d error: %s", draft.id, exc
-                )
-                try:
-                    await db.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        if posted > 0 or drafts:
-            logger.info(
-                "job_post_approved_drafts: processed=%d posted=%d",
-                len(drafts), posted,
-            )
-
-    except Exception as exc:
-        logger.error(
-            "job_post_approved_drafts: unhandled error: %s\n%s",
             exc, traceback.format_exc(),
         )
     finally:
@@ -633,16 +544,6 @@ class AgentScheduler:
         )
 
         self.scheduler.add_job(
-            job_cleanup_sessions,
-            IntervalTrigger(minutes=30),
-            id="system_cleanup_sessions",
-            replace_existing=True,
-            misfire_grace_time=300,
-            max_instances=1,
-            coalesce=True,
-        )
-
-        self.scheduler.add_job(
             job_cleanup_cooldowns,
             IntervalTrigger(hours=1),
             id="system_cleanup_cooldowns",
@@ -695,9 +596,27 @@ class AgentScheduler:
         )
 
         self.scheduler.add_job(
-            job_post_approved_drafts,
-            IntervalTrigger(minutes=10),
-            id="system_post_approved_drafts",
+            job_morning_briefing,
+            CronTrigger(
+                hour=settings.MORNING_BRIEFING_HOUR,
+                minute=0,
+                timezone="Asia/Kolkata",
+            ),
+            id="system_morning_briefing",
+            replace_existing=True,
+            misfire_grace_time=300,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        self.scheduler.add_job(
+            job_evening_summary,
+            CronTrigger(
+                hour=settings.EVENING_SUMMARY_HOUR,
+                minute=0,
+                timezone="Asia/Kolkata",
+            ),
+            id="system_evening_summary",
             replace_existing=True,
             misfire_grace_time=300,
             max_instances=1,
