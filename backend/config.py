@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     XAI_API_KEY: str
     XAI_MODEL: str = "grok-beta"
     XAI_MAX_TOKENS: int = 1000
+    GROK_MODEL: str = "grok-beta"
+    GROK_MODEL_MINI: str = "grok-beta"
+    GROK_SEARCH_MODE: str = "auto"
+    # Model used by TrendFetcher via xai-sdk Agent Tools API (x_search + web_search).
+    # Separate from XAI_MODEL which is used for draft generation via chat.completions.
+    GROK_MODEL_TRENDS: str = "grok-4"
 
     # --------------------------------------------------------------- Telegram
     TELEGRAM_BOT_TOKEN: str = ""
@@ -28,6 +34,11 @@ class Settings(BaseSettings):
 
     # --------------------------------------------------------------- Security
     SECRET_KEY: str  # Reserved for future JWT auth
+    COOKIE_ENCRYPT_KEY: str = ""  # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+    # ------------------------------------------------------------- Poster
+    MAX_POSTS_PER_ACCOUNT_DAY: int = 10
+    MIN_GAP_BETWEEN_POSTS_MIN: int = 30
 
     # ------------------------------------------------------------- Scheduler
     SPIKE_CHECK_INTERVAL_MINUTES: int = 15

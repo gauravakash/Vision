@@ -22,8 +22,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Optional
 
-import xai
-
 from backend.agent import xai_client
 from backend.config import settings
 from backend.logging_config import get_logger
@@ -357,7 +355,7 @@ At {intensity}% intensity:
 
     def _parse_style_profile(
         self,
-        response: xai.types.Message,
+        response: Any,
         handle: str,
     ) -> Optional[StyleProfile]:
         """Extract and parse the JSON style profile from Grok's response."""
@@ -420,7 +418,7 @@ At {intensity}% intensity:
             style_summary=data.get("style_summary", ""),
         )
 
-    async def _call_with_search(self, prompt: str) -> xai.types.Message:
+    async def _call_with_search(self, prompt: str) -> Any:
         tools = [{"type": "web_search_20250305", "name": "web_search"}]
         return await xai_client.chat.completions.create(
             model=settings.XAI_MODEL,

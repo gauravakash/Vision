@@ -19,7 +19,6 @@ import re
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
-import xai
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -561,7 +560,7 @@ THREAD STRUCTURE TO FOLLOW ({thread_type} — {thread_config["description"]}):
         system: str,
         user_message: str,
         max_tokens: int = 3000,
-    ) -> xai.types.Message:
+    ) -> Any:
         return await xai_client.chat.completions.create(
             model=settings.XAI_MODEL,
             max_tokens=max_tokens,
@@ -571,7 +570,7 @@ THREAD STRUCTURE TO FOLLOW ({thread_type} — {thread_config["description"]}):
             ],
         )
 
-    def _extract_text(self, response: xai.types.Message) -> str:
+    def _extract_text(self, response: Any) -> str:
         return response.choices[0].message.content.strip()
 
 

@@ -131,8 +131,8 @@ def is_safe_for_log(data: dict | str) -> bool:
 async def validate_xai_key(key: str) -> bool:
     """Test xAI API key with a minimal API call. Returns True if valid."""
     try:
-        import xai  # noqa: PLC0415
-        client = xai.Client(api_key=key)
+        from openai import AsyncOpenAI  # noqa: PLC0415
+        client = AsyncOpenAI(api_key=key, base_url="https://api.x.ai/v1")
         await client.chat.completions.create(
             model="grok-beta",
             max_tokens=10,

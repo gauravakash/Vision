@@ -23,9 +23,24 @@ import uuid
 from datetime import datetime, date
 from typing import Any, Optional
 
-import xai
+from openai import AsyncOpenAI
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# xai-sdk is used by TrendFetcher for live Agent Tools (x_search + web_search).
+# openai SDK is still used by DraftGenerator for chat.completions.
+# Imports are guarded so the module still loads if xai-sdk isn't installed yet.
+try:
+    from xai_sdk import AsyncClient as _XAIAsyncClient  # type: ignore[import-not-found]
+    from xai_sdk.chat import user as _sdk_user  # type: ignore[import-not-found]
+    from xai_sdk.tools import web_search as _sdk_web_search, x_search as _sdk_x_search  # type: ignore[import-not-found]
+    _HAS_XAI_SDK = True
+except Exception:  # noqa: BLE001
+    _XAIAsyncClient = None  # type: ignore[assignment]
+    _sdk_user = None  # type: ignore[assignment]
+    _sdk_web_search = None  # type: ignore[assignment]
+    _sdk_x_search = None  # type: ignore[assignment]
+    _HAS_XAI_SDK = False
 
 from backend.config import settings
 from backend.logging_config import get_logger
@@ -45,7 +60,18 @@ agent_logger = logging.getLogger("agent_activity")
 # 1. xAI / Grok client
 # ---------------------------------------------------------------------------
 
-xai_client = xai.Client(api_key=settings.XAI_API_KEY)
+xai_client = AsyncOpenAI(
+    api_key=settings.XAI_API_KEY,
+    base_url="https://api.x.ai/v1",
+)
+grok_client = xai_client  # alias used by trend_fetcher and personality_engine
+
+# xai-sdk client for Agent Tools API (live trend search).
+# Constructed lazily so a missing xai-sdk install doesn't break module import.
+if _HAS_XAI_SDK:
+    xai_sdk_client = _XAIAsyncClient(api_key=settings.XAI_API_KEY)
+else:
+    xai_sdk_client = None
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -197,9 +223,22 @@ Return ONLY the tweet text. No preamble, no explanation, no quotation marks arou
 
 class TrendFetcher:
     """
-    Uses Grok with the web_search tool to pull live trending topics for a desk.
+    Pulls live trending topics for a desk using xAI's Agent Tools API.
 
-    Results are saved as TrendSnapshot rows and returned as dicts.
+    Uses x_search (X/Twitter trends) + web_search (news context) via xai-sdk.
+    Results are persisted as TrendSnapshot rows and returned as dicts.
+
+    Output topic shape:
+      {
+        "tag":            "Arsenal Crisis",      # primary label
+        "topic_tag":      "Arsenal Crisis",      # alias for legacy consumers
+        "category":       "World Sports",
+        "volume_display": "2.4M",
+        "volume_numeric": 2400000,
+        "spike_percent":  45.0,
+        "status":         "rising",
+        "context":        "Arsenal lost 1-2 to Bournemouth ...",
+      }
     """
 
     def __init__(self) -> None:
@@ -211,85 +250,147 @@ class TrendFetcher:
         db: AsyncSession,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        search_prompt = self._prompt_builder.build_trend_search_prompt(desk)
+        if xai_sdk_client is None or not _HAS_XAI_SDK:
+            logger.error(
+                "TrendFetcher: xai-sdk not installed. Run `pip install xai-sdk>=1.3.1`."
+            )
+            return []
+
+        topics_str = ", ".join(desk.topics[:10]) if desk.topics else desk.name
+        prompt = (
+            f"Search X/Twitter RIGHT NOW for the top {limit} trending topics related "
+            f"to these keywords: {topics_str}\n\n"
+            f"For each trending topic find:\n"
+            f"- Current tweet volume\n"
+            f"- Why it is trending (one sentence)\n"
+            f"- Approximate spike percentage\n\n"
+            f"Return ONLY a valid JSON array. No text before or after. "
+            f"No markdown code blocks.\n\n"
+            f"[\n"
+            f"  {{\n"
+            f'    "tag": "#TopicName",\n'
+            f'    "category": "{desk.name}",\n'
+            f'    "volume_display": "2.4M",\n'
+            f'    "volume_numeric": 2400000,\n'
+            f'    "spike_percent": 45.0,\n'
+            f'    "status": "spiking",\n'
+            f'    "context": "one sentence what is happening"\n'
+            f"  }}\n"
+            f"]"
+        )
 
         try:
-            response = await self._call_with_search(search_prompt)
+            chat = xai_sdk_client.chat.create(
+                model=settings.GROK_MODEL_TRENDS,
+                tools=[_sdk_x_search(), _sdk_web_search()],
+            )
+            chat.append(_sdk_user(prompt))
+            response = await chat.sample()
+            raw_text = getattr(response, "content", None) or ""
         except Exception as exc:
             if _is_rate_limit_error(exc):
-                logger.warning("TrendFetcher: rate limit hit for desk %d, waiting 60s then retrying", desk.id)
+                logger.warning(
+                    "TrendFetcher: rate limit hit for desk %d, waiting 60s then retrying",
+                    desk.id,
+                )
                 await asyncio.sleep(60)
                 try:
-                    response = await self._call_with_search(search_prompt)
+                    chat = xai_sdk_client.chat.create(
+                        model=settings.GROK_MODEL_TRENDS,
+                        tools=[_sdk_x_search(), _sdk_web_search()],
+                    )
+                    chat.append(_sdk_user(prompt))
+                    response = await chat.sample()
+                    raw_text = getattr(response, "content", None) or ""
                 except Exception as retry_exc:
-                    logger.error("TrendFetcher: retry also failed for desk %d: %s", desk.id, retry_exc)
+                    logger.error(
+                        "TrendFetcher: retry failed for desk %d: %s", desk.id, retry_exc
+                    )
                     return []
             elif _is_auth_error(exc):
-                logger.critical("TrendFetcher: authentication error — check XAI_API_KEY: %s", exc)
+                logger.critical(
+                    "TrendFetcher: authentication error — check XAI_API_KEY: %s", exc
+                )
                 raise
             else:
-                logger.error("TrendFetcher: unexpected error for desk %d: %s", desk.id, exc)
+                logger.error(
+                    "TrendFetcher: unexpected error for desk %d: %s",
+                    desk.id, exc, exc_info=True,
+                )
                 return []
 
-        # Record metrics
+        # Record usage if available
         try:
             from backend.monitoring import app_metrics as _metrics  # noqa: PLC0415
             usage = getattr(response, "usage", None)
-            input_tokens = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
-            output_tokens = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0)
+            input_tokens = (
+                getattr(usage, "input_tokens", None)
+                or getattr(usage, "prompt_tokens", 0)
+            )
+            output_tokens = (
+                getattr(usage, "output_tokens", None)
+                or getattr(usage, "completion_tokens", 0)
+            )
             await _metrics.record_api_call(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=input_tokens or 0,
+                output_tokens=output_tokens or 0,
                 error=False,
             )
         except Exception:
             pass
 
-        topics = self._parse_grok_response(response)
-        validated = [self._validate_topic(t) for t in topics if t]
+        if not raw_text:
+            logger.warning("TrendFetcher: empty response for desk '%s'", desk.name)
+            return []
+
+        topics = self._parse_response(raw_text, desk)
+        validated = [self._validate_topic(t, desk) for t in topics]
         validated = [t for t in validated if t is not None][:limit]
 
-        # Persist as TrendSnapshot rows
+        # Persist TrendSnapshot rows (so spike detection can compare over time)
         now = datetime.utcnow()
         for topic_data in validated:
-            snapshot = TrendSnapshot(
-                desk_id=desk.id,
-                topic_tag=topic_data["topic_tag"],
-                category=topic_data.get("category"),
-                volume_display=topic_data.get("volume_display"),
-                status=topic_data.get("status", "stable"),
-                context=topic_data.get("context"),
-                snapshot_time=now,
-            )
-            db.add(snapshot)
+            try:
+                snapshot = TrendSnapshot(
+                    desk_id=desk.id,
+                    topic_tag=topic_data["tag"][:200],
+                    category=(topic_data.get("category") or None),
+                    volume_display=(topic_data.get("volume_display") or None),
+                    volume_numeric=topic_data.get("volume_numeric") or None,
+                    spike_percent=topic_data.get("spike_percent") or None,
+                    status=topic_data.get("status", "stable"),
+                    context=topic_data.get("context") or None,
+                    snapshot_time=now,
+                )
+                db.add(snapshot)
+            except Exception as exc:
+                logger.warning("TrendFetcher: could not build snapshot row: %s", exc)
 
         try:
             await db.commit()
         except Exception as exc:
-            logger.error("TrendFetcher: failed to save snapshots for desk %d: %s", desk.id, exc)
+            logger.error(
+                "TrendFetcher: failed to save snapshots for desk %d: %s", desk.id, exc
+            )
             await db.rollback()
 
         return validated
 
-    async def _call_with_search(self, prompt: str) -> xai.types.Message:
-        tools = [{"type": "web_search_20250305", "name": "web_search"}]
-        return await xai_client.chat.completions.create(
-            model=settings.XAI_MODEL,
-            max_tokens=2000,
-            tools=tools,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-    def _parse_grok_response(self, response: xai.types.Message) -> list[dict]:
-        """Extract JSON array from Grok's response, tolerating prose wrappers."""
-        full_text = (response.choices[0].message.content or "").strip()
-
-        if not full_text.strip():
-            logger.warning("TrendFetcher: Grok returned no text content")
+    def _parse_response(self, raw: str, desk: Desk) -> list[dict]:
+        """Robustly extract a JSON array from the model's response."""
+        if not raw:
             return []
 
-        # Try to extract JSON array with regex first
-        match = re.search(r"\[[\s\S]*\]", full_text)
+        # 1. Direct parse
+        try:
+            data = json.loads(raw.strip())
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+        # 2. Regex-extract the first JSON array
+        match = re.search(r"\[[\s\S]*\]", raw)
         if match:
             try:
                 data = json.loads(match.group())
@@ -298,43 +399,66 @@ class TrendFetcher:
             except json.JSONDecodeError:
                 pass
 
-        # Fallback: try the whole response as JSON
+        # 3. Quote-normalization fallback (single → double)
         try:
-            data = json.loads(full_text.strip())
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
+            fixed = raw.replace("'", '"')
+            m2 = re.search(r"\[[\s\S]*\]", fixed)
+            if m2:
+                data = json.loads(m2.group())
+                if isinstance(data, list):
+                    return data
+        except Exception:
             pass
 
-        logger.warning("TrendFetcher: could not parse JSON from response: %.200s", full_text)
+        logger.warning(
+            "TrendFetcher: could not parse trends JSON for desk '%s'. First 500: %s",
+            desk.name, raw[:500],
+        )
         return []
 
-    def _validate_topic(self, raw: Any) -> Optional[dict[str, Any]]:
-        """Normalise and validate a single topic dict from Claude's response."""
+    def _validate_topic(self, raw: Any, desk: Desk) -> Optional[dict[str, Any]]:
+        """Normalise one topic dict; accept both new (`tag`) and legacy (`topic_tag`) shapes."""
         if not isinstance(raw, dict):
             return None
 
-        topic_tag = raw.get("topic_tag", "").strip()
-        if not topic_tag:
+        tag = (raw.get("tag") or raw.get("topic_tag") or "").strip()
+        if not tag:
             return None
 
-        # Truncate to model limits
-        topic_tag = topic_tag[:200]
-        context = str(raw.get("context", "")).strip()[:500] if raw.get("context") else None
-        category = str(raw.get("category", "")).strip()[:100] if raw.get("category") else None
-        volume_display = str(raw.get("volume_display", "")).strip()[:20] if raw.get("volume_display") else None
+        def _int_or_none(v: Any) -> Optional[int]:
+            try:
+                return int(v) if v is not None and v != "" else None
+            except (ValueError, TypeError):
+                return None
 
-        status = raw.get("status", "stable")
+        def _float_or_none(v: Any) -> Optional[float]:
+            try:
+                return float(v) if v is not None and v != "" else None
+            except (ValueError, TypeError):
+                return None
+
+        status = str(raw.get("status") or "stable").strip().lower()
+        if status == "trending":
+            status = "rising"
         if status not in ("stable", "rising", "spiking"):
             status = "stable"
 
-        return {
-            "topic_tag": topic_tag,
-            "context": context,
-            "category": category,
-            "volume_display": volume_display,
+        context_val = raw.get("context")
+        category_val = raw.get("category")
+        volume_val = raw.get("volume_display")
+
+        normalised = {
+            "tag": tag[:200],
+            # Alias retained for any consumer still reading topic_tag
+            "topic_tag": tag[:200],
+            "category": str(category_val).strip()[:100] if category_val else desk.name[:100],
+            "volume_display": str(volume_val).strip()[:20] if volume_val else None,
+            "volume_numeric": _int_or_none(raw.get("volume_numeric")),
+            "spike_percent": _float_or_none(raw.get("spike_percent")),
             "status": status,
+            "context": str(context_val).strip()[:500] if context_val else None,
         }
+        return normalised
 
 
 # ---------------------------------------------------------------------------
@@ -473,44 +597,75 @@ class DraftGenerator:
         all_accounts: list[Account] = result.scalars().all()
 
         # Filter to accounts that belong to this desk
+        # (JSON column — filter in Python since SQLite can't query JSON natively)
         accounts = [
             a for a in all_accounts
             if desk.id in (a.desk_ids or [])
         ]
 
+        logger.info(
+            "DraftGenerator: desk %d (%s) has %d eligible account(s)",
+            desk.id, desk.name, len(accounts),
+        )
+
         if not accounts:
-            logger.info("DraftGenerator: no eligible accounts for desk %d", desk.id)
+            logger.warning(
+                "DraftGenerator: no accounts assigned to desk %d (%s). "
+                "Add accounts first via /addaccount in Telegram.",
+                desk.id, desk.name,
+            )
+            try:
+                from backend.notifier import notifier as _notifier  # noqa: PLC0415
+                if _notifier.is_configured:
+                    await _notifier.send_system_alert(
+                        "warning",
+                        f"Desk '{desk.name}' (id={desk.id}) has no accounts assigned. "
+                        f"Add via /addaccount in Telegram.",
+                    )
+            except Exception as exc:
+                logger.debug("DraftGenerator: notifier alert failed: %s", exc)
             return []
 
         if not topics:
             logger.info("DraftGenerator: no topics provided for desk %d", desk.id)
             return []
 
-        # Build task list: one per (account, topic) pair, rotating topics across accounts
-        tasks = []
-        max_drafts = settings.MAX_DRAFTS_PER_RUN
-        count = 0
-        for i, account in enumerate(accounts):
-            if count >= max_drafts:
-                break
-            topic_data = topics[i % len(topics)]
-            topic_tag = topic_data.get("topic_tag", "")
-            context = topic_data.get("context")
-            if not topic_tag:
-                continue
+        # Pick the single best topic by spike_percent (fall back to first topic)
+        def _spike(t: dict[str, Any]) -> float:
+            try:
+                return float(t.get("spike_percent") or 0)
+            except (TypeError, ValueError):
+                return 0.0
 
-            tasks.append(
-                self.generate_single(
-                    account=account,
-                    topic=topic_tag,
-                    desk=desk,
-                    content_type=content_type,
-                    run_id=run_id,
-                    is_spike_draft=False,
-                    context=context,
-                )
+        best_topic = max(topics, key=_spike) if topics else topics[0]
+        topic_tag = (best_topic.get("tag") or best_topic.get("topic_tag") or "").strip()
+        context = best_topic.get("context")
+
+        if not topic_tag:
+            logger.warning(
+                "DraftGenerator: best topic has no tag for desk %d — skipping run", desk.id
             )
-            count += 1
+            return []
+
+        logger.info(
+            "DraftGenerator: desk %d best topic=%r spike=%.1f%% — generating for %d account(s)",
+            desk.id, topic_tag, _spike(best_topic), len(accounts),
+        )
+
+        # One draft per eligible account, all for the same best topic, capped at MAX_DRAFTS_PER_RUN
+        max_drafts = settings.MAX_DRAFTS_PER_RUN
+        tasks = [
+            self.generate_single(
+                account=acc,
+                topic=topic_tag,
+                desk=desk,
+                content_type=content_type,
+                run_id=run_id,
+                is_spike_draft=False,
+                context=context,
+            )
+            for acc in accounts[:max_drafts]
+        ]
 
         if not tasks:
             return []
@@ -538,7 +693,7 @@ class DraftGenerator:
 
         return drafts
 
-    async def _call_plain(self, system: str, user_message: str) -> xai.types.Message:
+    async def _call_plain(self, system: str, user_message: str) -> Any:
         return await xai_client.chat.completions.create(
             model=settings.XAI_MODEL,
             max_tokens=settings.XAI_MAX_TOKENS,
@@ -548,7 +703,7 @@ class DraftGenerator:
             ],
         )
 
-    def _extract_text(self, response: xai.types.Message) -> str:
+    def _extract_text(self, response: Any) -> str:
         """Pull text from the response."""
         return response.choices[0].message.content.strip()
 
@@ -661,14 +816,28 @@ class Agent:
                 topics = []
 
         if not topics:
+            fallback_tag = (desk.topics[0] if desk.topics else desk.name).strip()
+            logger.warning(
+                "Agent.run_desk: no trends for desk %d (%s) — using fallback topic %r",
+                desk_id, desk.name, fallback_tag,
+            )
+            topics = [{
+                "tag": fallback_tag,
+                "topic_tag": fallback_tag,
+                "category": desk.name[:100],
+                "volume_display": "Trending",
+                "volume_numeric": 100000,
+                "spike_percent": 50.0,
+                "status": "rising",
+                "context": f"Latest developments in {desk.name}",
+            }]
             await self._log_activity(
                 db,
                 event_type="agent_no_trends",
-                message=f"No trends found for desk '{desk.name}'",
+                message=f"No live trends for '{desk.name}' — using fallback topic '{fallback_tag}'",
                 color="#E67E22",
                 desk_id=desk_id,
             )
-            return {"run_id": run_id, "drafts_created": 0, "topics_found": 0}
 
         # Generate drafts
         try:
